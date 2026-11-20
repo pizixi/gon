@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gioui.org/f32"
+	"gioui.org/gpu/headless"
 	"gioui.org/io/input"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -371,6 +372,56 @@ func TestSplitPaneSelectionAndMouseUseTheDrawnGrid(t *testing.T) {
 		if got := takeWrite(t, p); got != want {
 			t.Fatalf("mouse report = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestTerminalDragPreviewsCurrentMousePosition(t *testing.T) {
+	a := New(config.Default(), nil, "")
+	a.started = true
+	defer a.shutdown()
+	tb := new(Tab)
+	p := newInputPane()
+	tb.addPane(newInputPane(), SplitRight)
+	tb.addPane(p, SplitRight)
+	a.tabs = []*Tab{tb}
+	h := &layoutTest{App: a, size: image.Pt(1000, 540), metric: unit.Metric{PxPerDp: 1.5, PxPerSp: 1.5}}
+	h.frame()
+	term.NewParser(p.scr).Write([]byte("header\r\na b c d e f"))
+	h.frame()
+	grid := p.presented.grid
+	point := func(col int) image.Point {
+		m := grid.Metrics
+		return grid.Bounds.Min.Add(image.Pt(col*m.CellW+m.CellW/2, m.CellH+m.CellH/2))
+	}
+	a.selectionCursor = func() (image.Point, bool) { return point(7), true }
+
+	h.mouse(pointer.Press, point(2), pointer.ButtonPrimary)
+	h.mouse(pointer.Move, point(4), pointer.ButtonPrimary)
+	if _, start, _, end, active := p.SelectionRange(); !active || start != 2 || end != 7 {
+		t.Fatalf("preview columns = %d through %d, active=%v", start, end, active)
+	}
+	t.Run("highlight", func(t *testing.T) {
+		win, err := headless.NewWindow(h.size.X, h.size.Y)
+		if err != nil {
+			t.Skipf("headless GPU unavailable: %v", err)
+		}
+		defer win.Release()
+		if err := win.Frame(&h.ops); err != nil {
+			t.Fatal(err)
+		}
+		img := image.NewRGBA(image.Rectangle{Max: h.size})
+		if err := win.Screenshot(img); err != nil {
+			t.Fatal(err)
+		}
+		inside, outside := point(7), point(9)
+		if img.RGBAAt(inside.X, inside.Y) == img.RGBAAt(outside.X, outside.Y) {
+			t.Fatal("selection highlight did not reach the current mouse position")
+		}
+	})
+
+	h.mouse(pointer.Release, point(5), 0)
+	if got := p.SelectedText(); got != "b c" {
+		t.Fatalf("released selection = %q, want b c", got)
 	}
 }
 

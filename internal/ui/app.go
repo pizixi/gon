@@ -69,8 +69,8 @@ type App struct {
 	resizeTile      *paneTile
 	resizeOffset    int
 
-	// selection owner
-	selecting *Pane
+	selecting       *Pane
+	selectionCursor func() (image.Point, bool)
 
 	// clipboard
 	clipboard     string
@@ -155,6 +155,9 @@ func New(cfg config.Config, win *app.Window, configPath string) *App {
 		minPaneSize:     image.Pt(minPaneWidth, minPaneHeight),
 		fontBase:        int(cfg.Font.Size + 0.5),
 		launches:        make(chan pendingLaunch, 16),
+	}
+	a.selectionCursor = func() (image.Point, bool) {
+		return windowDragCursor(a.hwnd.Load())
 	}
 	a.theme = buildTheme(cfg)
 	font, _ := fontset.ResolveChoice(a.fontDirectory, cfg.Font.Family)

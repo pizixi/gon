@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"runtime"
 	"unsafe"
 
 	"gioui.org/app"
@@ -20,6 +21,12 @@ var (
 	getForegroundWindow = user32.NewProc("GetForegroundWindow")
 	isIconic            = user32.NewProc("IsIconic")
 	getWindowDPI        = user32.NewProc("GetDpiForWindow")
+	getWindowDPIContext = user32.NewProc("GetWindowDpiAwarenessContext")
+	setThreadDPIContext = user32.NewProc("SetThreadDpiAwarenessContext")
+	getCursorPos        = user32.NewProc("GetCursorPos")
+	screenToClient      = user32.NewProc("ScreenToClient")
+	getAsyncKeyState    = user32.NewProc("GetAsyncKeyState")
+	getSystemMetrics    = user32.NewProc("GetSystemMetrics")
 	getMonitorDPI       = windows.NewLazySystemDLL("shcore.dll").NewProc("GetDpiForMonitor")
 	monitorFromWindow   = user32.NewProc("MonitorFromWindow")
 	monitorFromRect     = user32.NewProc("MonitorFromRect")
@@ -37,6 +44,44 @@ func setWindowTitle(hwnd uintptr, title string) {
 	if text, err := windows.UTF16PtrFromString(title); err == nil {
 		procSetWindowText.Call(hwnd, uintptr(unsafe.Pointer(text)))
 	}
+}
+
+func windowDragCursor(hwnd uintptr) (image.Point, bool) {
+	if hwnd == 0 {
+		return image.Point{}, false
+	}
+	const (
+		smSwapButton  = 23
+		vkLeftButton  = 0x01
+		vkRightButton = 0x02
+		keyDown       = 0x8000
+	)
+	button := uintptr(vkLeftButton)
+	if swapped, _, _ := getSystemMetrics.Call(smSwapButton); swapped != 0 {
+		button = vkRightButton
+	}
+	if state, _, _ := getAsyncKeyState.Call(button); state&keyDown == 0 {
+		return image.Point{}, false
+	}
+
+	// Layout runs on a Go goroutine. Match the HWND's DPI context so the
+	// converted point is in the same client pixels as Gio's pointer events.
+	dpiContext, _, _ := getWindowDPIContext.Call(hwnd)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	previous, _, _ := setThreadDPIContext.Call(dpiContext)
+	if previous == 0 {
+		return image.Point{}, false
+	}
+	defer setThreadDPIContext.Call(previous)
+	var pt struct{ X, Y int32 }
+	if ok, _, _ := getCursorPos.Call(uintptr(unsafe.Pointer(&pt))); ok == 0 {
+		return image.Point{}, false
+	}
+	if ok, _, _ := screenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt))); ok == 0 {
+		return image.Point{}, false
+	}
+	return image.Pt(int(pt.X), int(pt.Y)), true
 }
 
 // StartupWindowSize clamps the initial window before Gio shows it.

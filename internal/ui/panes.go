@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -445,6 +446,7 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 		grid = a.view.Grid(area)
 	}
 
+	mouseDrag := false
 	for {
 		ev, ok := gtx.Event(
 			pointer.Filter{
@@ -471,6 +473,7 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 		switch ev := ev.(type) {
 		case pointer.Event:
 			a.handlePanePointer(gtx, p, ev, grid)
+			mouseDrag = ev.Kind == pointer.Drag && ev.Source == pointer.Mouse
 		case key.Event:
 			if !focused || a.searchOpen {
 				continue
@@ -512,6 +515,17 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 				p.Paste(string(data))
 			}
 			a.invalidate()
+		}
+	}
+
+	if mouseDrag && a.selecting == p && p.mouseButton == 0 {
+		// The mouse can move past queued drag events before this frame is drawn.
+		// Refresh the preview once, using the grid that received those events.
+		if at, ok := a.selectionCursor(); ok {
+			local := at.Sub(grid.Bounds.Min)
+			if cell, _, hit := grid.Hit(f32.Pt(float32(local.X), float32(local.Y)), true); hit {
+				p.SelectionExtend(cell.X, cell.Y)
+			}
 		}
 	}
 
@@ -599,7 +613,6 @@ func (a *App) handlePanePointer(gtx layout.Context, p *Pane, ev pointer.Event, g
 				p.SelectionStart(cx, cy)
 			}
 			a.selecting = p
-			a.invalidate()
 		}
 	case pointer.Drag:
 		if !hit {
@@ -613,7 +626,6 @@ func (a *App) handlePanePointer(gtx layout.Context, p *Pane, ev pointer.Event, g
 		}
 		if a.selecting == p {
 			p.SelectionExtend(cx, cy)
-			a.invalidate()
 		}
 	case pointer.Move:
 		if hit && reportMouse && mouseMode == term.MouseMotion && p.mouseButton == 0 && a.selecting != p {
@@ -635,7 +647,6 @@ func (a *App) handlePanePointer(gtx layout.Context, p *Pane, ev pointer.Event, g
 		if a.selecting == p {
 			if hit && ev.Kind == pointer.Release && a.clickCount == 1 {
 				p.SelectionExtend(cx, cy)
-				a.invalidate()
 			}
 			a.selecting = nil
 		}
