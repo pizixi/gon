@@ -1,0 +1,85 @@
+{
+  "shells": [
+    {
+      "name": "PowerShell",
+      "command": "pwsh.exe",
+      "args": [
+        "-NoLogo"
+      ]
+    },
+    {
+      "name": "Windows PowerShell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo"
+      ]
+    },
+    {
+      "name": "Command Prompt",
+      "command": "cmd.exe"
+    },
+    {
+      "name": "WSL",
+      "command": "wsl.exe"
+    }
+  ],
+  "default_shell": 0,
+  "startup_tabs": 1,
+  "single_window": false,
+  "scrollback": 8000,
+  "cursor_blink_ms": 530,
+  "font": {
+    "family": "Cascadia Mono",
+    "size": 15,
+    "line_height": 1.05,
+    "cjk_fallback": [
+      "msyh.ttc",
+      "simhei.ttf",
+      "simsun.ttc",
+      "Deng.ttf"
+    ]
+  },
+  "interface_font": {
+    "family": "",
+    "size": 13
+  },
+  "window": {
+    "width": 1180,
+    "height": 760,
+    "fullscreen": false,
+    "position": { "centered": true, "x": 0, "y": 0 },
+    "transparency": 0.05,
+    "opacity": 0.82,
+    "blur": 36,
+    "sidebar_width": 210,
+    "padding": 10,
+    "radius": 10
+  },
+  "theme": {
+    "background": "#0b0f14",
+    "foreground": "#e6edf3",
+    "cursor": "#7ee787",
+    "selection": "#3f6ea8",
+    "accent": "#4c9aff",
+    "panel": "#0e131a",
+    "palette": [
+      "#1c1f26",
+      "#e06c75",
+      "#98c379",
+      "#e5c07b",
+      "#61afef",
+      "#c678dd",
+      "#56b6c2",
+      "#dcdfe4",
+      "#5c6370",
+      "#e06c75",
+      "#98c379",
+      "#e5c07b",
+      "#61afef",
+      "#c678dd",
+      "#56b6c2",
+      "#ffffff"
+    ]
+  },
+  "wallpaper": ""
+}

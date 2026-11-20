@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: gon
+
+jobs:
+  build:
+    name: Build Windows/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, '386']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Gon
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          asset="${APP_NAME}_${GITHUB_REF_NAME}_windows_${GOARCH}.exe"
+          go build -trimpath -ldflags="-s -w" -o "dist/${asset}" ./cmd/gon
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: gon-windows-${{ matrix.arch }}
+          path: dist/*.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download executables
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gon-windows-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Prepare checksums and release notes
+        run: |
+          set -euo pipefail
+          (
+            cd release-assets
+            sha256sum gon_*.exe > SHA256SUMS.txt
+          )
+          cp gon.example.json release-assets/
+          cp internal/pty/runtime/LICENSE release-assets/ConPTY-LICENSE.txt
+
+          tag_message="$(git for-each-ref --format='%(if:equals=tag)%(objecttype)%(then)%(contents)%(end)' "${GITHUB_REF}")"
+          previous="$(git describe --tags --match 'v*' --abbrev=0 "${GITHUB_REF}^" 2>/dev/null || true)"
+          {
+            if [[ -n "${tag_message}" ]]; then
+              printf '### 更新说明\n\n%s\n\n' "${tag_message}"
+            fi
+
+            printf '### 变更摘要\n\n'
+            if [[ -n "${previous}" ]]; then
+              git log --format='- %s (%h)' "${previous}..${GITHUB_REF}"
+            else
+              git log --format='- %s (%h)' "${GITHUB_REF}"
+            fi
+
+            printf '\n### 下载\n\n'
+            printf '| Windows 架构 | 文件 |\n| --- | --- |\n'
+            printf '| x64 | `%s_%s_windows_amd64.exe` |\n' "${APP_NAME}" "${GITHUB_REF_NAME}"
+            printf '| ARM64 | `%s_%s_windows_arm64.exe` |\n' "${APP_NAME}" "${GITHUB_REF_NAME}"
+            printf '| x86 | `%s_%s_windows_386.exe` |\n' "${APP_NAME}" "${GITHUB_REF_NAME}"
+            printf '\n下载对应的 `.exe` 后即可运行。可使用 `SHA256SUMS.txt` 校验文件。\n'
+          } > release-notes.md
+
+      - name: Publish Gon release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Gon ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          prerelease: ${{ contains(github.ref_name, '-') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.exe
+            release-assets/SHA256SUMS.txt
+            release-assets/gon.example.json
+            release-assets/ConPTY-LICENSE.txt
