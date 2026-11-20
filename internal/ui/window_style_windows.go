@@ -15,10 +15,10 @@ import (
 )
 
 var user32 = windows.NewLazySystemDLL("user32.dll")
-var showWindowAsync = user32.NewProc("ShowWindowAsync")
 
 var (
 	getForegroundWindow = user32.NewProc("GetForegroundWindow")
+	isIconic            = user32.NewProc("IsIconic")
 	getWindowDPI        = user32.NewProc("GetDpiForWindow")
 	getMonitorDPI       = windows.NewLazySystemDLL("shcore.dll").NewProc("GetDpiForMonitor")
 	monitorFromWindow   = user32.NewProc("MonitorFromWindow")
@@ -170,10 +170,12 @@ func fitWindowRect(bounds, work image.Rectangle) image.Rectangle {
 	return image.Rectangle{Min: origin, Max: origin.Add(size)}
 }
 
-func restoreWindow(hwnd uintptr) {
-	if hwnd != 0 {
-		showWindowAsync.Call(hwnd, windows.SW_RESTORE)
+func isWindowMinimized(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
 	}
+	minimized, _, _ := isIconic.Call(hwnd)
+	return minimized != 0
 }
 
 const (

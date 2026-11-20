@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           asset="${APP_NAME}_${GITHUB_REF_NAME}_windows_${GOARCH}.exe"
-          go build -trimpath -ldflags="-s -w" -o "dist/${asset}" ./cmd/gon
+          go build -trimpath -ldflags="-H windowsgui -s -w" -o "dist/${asset}" ./cmd/gon
 
       - name: Upload executable
         uses: actions/upload-artifact@v4

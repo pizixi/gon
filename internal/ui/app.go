@@ -238,9 +238,6 @@ func (a *App) DeliverLaunch(ctx context.Context, request launch.Request) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	if a.minimized.Load() {
-		restoreWindow(a.hwnd.Load())
-	}
 	a.invalidate()
 	select {
 	case err := <-job.result:
@@ -562,6 +559,10 @@ func (a *App) Run() error {
 				}
 				a.updateWindowOpacity()
 			}
+		}
+		// Invalidate wakes a minimized window without necessarily drawing a frame.
+		if len(a.launches) != 0 && isWindowMinimized(a.hwnd.Load()) {
+			a.perform(system.ActionRaise)
 		}
 	}
 }
