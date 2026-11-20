@@ -446,7 +446,22 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 		grid = a.view.Grid(area)
 	}
 
-	mouseDrag := false
+	// Consecutive mouse drags describe one caret. Forward only the last one
+	// instead of making a TUI redraw every stale position in the frame queue.
+	var drag pointer.Event
+	flushDrag := func(latest bool) {
+		if drag.Kind == 0 {
+			return
+		}
+		if latest && a.selectionCursor != nil && (a.selecting == p || p.mouseButton == 1) {
+			if at, ok := a.selectionCursor(); ok {
+				local := at.Sub(grid.Bounds.Min)
+				drag.Position = f32.Pt(float32(local.X), float32(local.Y))
+			}
+		}
+		a.handlePanePointer(gtx, p, drag, grid)
+		drag = pointer.Event{}
+	}
 	for {
 		ev, ok := gtx.Event(
 			pointer.Filter{
@@ -470,10 +485,19 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 		if !ok {
 			break
 		}
+		if next, ok := ev.(pointer.Event); ok && next.Kind == pointer.Drag && next.Source == pointer.Mouse {
+			if drag.Kind != 0 && (drag.PointerID != next.PointerID || drag.Buttons != next.Buttons || drag.Modifiers != next.Modifiers) {
+				flushDrag(false)
+			}
+			drag = next
+			continue
+		}
+		// A release, cancel, modifier change or other input is an ordering
+		// boundary. Never sample a future cursor position across that boundary.
+		flushDrag(false)
 		switch ev := ev.(type) {
 		case pointer.Event:
 			a.handlePanePointer(gtx, p, ev, grid)
-			mouseDrag = ev.Kind == pointer.Drag && ev.Source == pointer.Mouse
 		case key.Event:
 			if !focused || a.searchOpen {
 				continue
@@ -518,16 +542,7 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 		}
 	}
 
-	if mouseDrag && a.selecting == p && p.mouseButton == 0 {
-		// The mouse can move past queued drag events before this frame is drawn.
-		// Refresh the preview once, using the grid that received those events.
-		if at, ok := a.selectionCursor(); ok {
-			local := at.Sub(grid.Bounds.Min)
-			if cell, _, hit := grid.Hit(f32.Pt(float32(local.X), float32(local.Y)), true); hit {
-				p.SelectionExtend(cell.X, cell.Y)
-			}
-		}
-	}
+	flushDrag(true)
 
 	if focused && !a.searchOpen && !gtx.Focused(tag) {
 		gtx.Execute(key.FocusCmd{Tag: tag})
@@ -671,6 +686,7 @@ func (a *App) handlePanePointer(gtx layout.Context, p *Pane, ev pointer.Event, g
 			}
 			report := term.EncodeMouse(btn, pos.X, pos.Y, true, toMods(ev.Modifiers), encoding)
 			ticks := max(1, min(16, iabs(int(dy))/120))
+			p.noteMouseInput()
 			p.SendText(strings.Repeat(report, ticks))
 			a.invalidate()
 			return

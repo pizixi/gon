@@ -81,6 +81,7 @@ func windowMoveProc(hwnd uintptr, msg uint32, wParam, lParam, id, _ uintptr) uin
 	value, ok := windowMoveStates.Load(hwnd)
 	if ok {
 		move := value.(*windowMoveState)
+		lParam = pointerMessagePosition(hwnd, msg, wParam, lParam)
 		if result, handled := move.ime.handle(hwnd, msg, wParam, lParam); handled {
 			return result
 		}

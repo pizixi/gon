@@ -163,11 +163,10 @@ func (a *App) updateTabInput(gtx layout.Context, list sidebarList) {
 				}
 				if a.tabDrag.tab == nil && isPrimaryPress(e) {
 					row := list.row(i, a.sideScroll)
-					if tab.closeShown && pos.In(tabCloseBounds(gtx, row)) {
+					if pos.In(tabCloseBounds(gtx, row)) {
 						continue
 					}
 					a.tabDrag = tabDrag{tab: tab, id: e.PointerID, start: pos, at: pos, offset: pos.Y - row.Min.Y}
-					gtx.Execute(pointer.GrabCmd{Tag: tag, ID: e.PointerID})
 				}
 			case pointer.Cancel:
 				if a.tabDrag.tab == tab {
@@ -179,8 +178,13 @@ func (a *App) updateTabInput(gtx layout.Context, list sidebarList) {
 					continue
 				}
 				drag.at = pos
-				travel := pos.Sub(drag.start)
-				drag.moving = drag.moving || len(a.tabs) > 1 && max(iabs(travel.X), iabs(travel.Y)) >= gtx.Dp(4)
+				if e.Kind == pointer.Drag && !drag.moving && len(a.tabs) > 1 {
+					travel := pos.Sub(drag.start)
+					if max(iabs(travel.X), iabs(travel.Y)) >= gtx.Dp(4) {
+						drag.moving = true
+						gtx.Execute(pointer.GrabCmd{Tag: tag, ID: e.PointerID})
+					}
+				}
 				if e.Kind != pointer.Release {
 					continue
 				}
@@ -285,9 +289,13 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	fitted := a.fitTabLabel(label, px, close.Min.X-x-gtx.Dp(4))
 	a.drawText(gtx, fitted, x, baseline, px, a.titleColor(gtx, title, col), 0xff)
 	tab.closeShown = hover && !dragged && gtx.Enabled()
-	if tab.closeShown {
-		a.drawIconButton(gtx, close, &tab.closeButton, "关闭标签页", drawCloseIcon)
+	closeContext := gtx
+	if dragged {
+		closeContext = closeContext.Disabled()
 	}
+	// Register the close target even before a hover frame paints its icon.
+	// Otherwise a quick click enters the row's drag/click gesture first.
+	a.layoutIconButton(closeContext, close, &tab.closeButton, "关闭标签页", drawCloseIcon, tab.closeShown)
 }
 
 func (a *App) drawTabDrag(gtx layout.Context, list sidebarList, px int) {
@@ -313,11 +321,18 @@ func (a *App) drawTabDrag(gtx layout.Context, list sidebarList, px int) {
 }
 
 func (a *App) drawIconButton(gtx layout.Context, r image.Rectangle, button *widget.Clickable, label string, icon func(layout.Context, image.Point, uint32)) {
+	a.layoutIconButton(gtx, r, button, label, icon, true)
+}
+
+func (a *App) layoutIconButton(gtx layout.Context, r image.Rectangle, button *widget.Clickable, label string, icon func(layout.Context, image.Point, uint32), shown bool) {
 	if r.Empty() {
 		return
 	}
 	defer op.Offset(r.Min).Push(gtx.Ops).Pop()
 	button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if !shown {
+			return layout.Dimensions{Size: r.Size()}
+		}
 		pointer.CursorPointer.Add(gtx.Ops)
 		semantic.LabelOp(label).Add(gtx.Ops)
 		semantic.Button.Add(gtx.Ops)

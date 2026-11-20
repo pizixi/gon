@@ -297,12 +297,15 @@ func rasterize(face *fontset.Face, key Key) *bitmap {
 	if stroke > 0 {
 		passes = 5
 	}
+	// Synthetic bold repeats the outline at five offsets. Reset reuses the
+	// coverage work buffer while clearing it between independent passes.
+	var ras vector.Rasterizer
 	for i := 0; i < passes; i++ {
 		dx := float32(0)
 		if stroke > 0 {
 			dx = float32(i) / float32(passes-1) * stroke
 		}
-		ras := vector.NewRasterizer(ww, hh)
+		ras.Reset(ww, hh)
 		ras.DrawOp = drawOver
 		for _, seg := range outline {
 			p := seg.Args

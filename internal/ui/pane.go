@@ -5,7 +5,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"gioui.org/layout"
 	"gioui.org/widget"
@@ -23,9 +25,10 @@ type Pane struct {
 	parser *term.Parser
 	sess   *pty.Session
 
-	cols, rows    int
-	visible       atomic.Bool
-	outputChanged atomic.Bool
+	cols, rows      int
+	visible         atomic.Bool
+	outputChanged   atomic.Bool
+	mouseInputUntil atomic.Int64 // PTY output shortly after mouse input should redraw immediately
 
 	// scrollOffset is the number of lines scrolled back from the bottom.
 	scrollOffset int
@@ -341,7 +344,7 @@ func (p *Pane) MouseMode() (mode int, encoding term.MouseEncoding) {
 	return p.scr.MouseMode(), p.scr.MouseEncoding()
 }
 
-// SendMouse forwards a mouse event using cell coordinates.
+// SendMouse forwards a mouse event using the application's coordinate format.
 func (p *Pane) SendMouse(button int, pos image.Point, press bool, mods term.Mods, encoding term.MouseEncoding) {
 	seq := term.EncodeMouse(button, pos.X, pos.Y, press, mods, encoding)
 	if button >= 32 && button < 64 {
@@ -352,7 +355,19 @@ func (p *Pane) SendMouse(button int, pos image.Point, press bool, mods term.Mods
 	} else {
 		p.lastMouseMotion = ""
 	}
+	if seq != "" {
+		p.noteMouseInput()
+	}
 	p.SendText(seq)
+}
+
+func (p *Pane) noteMouseInput() {
+	// Include the response to the final release even after the drag ends.
+	p.mouseInputUntil.Store(time.Now().Add(150 * time.Millisecond).UnixNano())
+}
+
+func (p *Pane) mouseInputRecent(now time.Time) bool {
+	return now.UnixNano() < p.mouseInputUntil.Load()
 }
 
 func (p *Pane) sendFocus(focused bool) {
@@ -686,68 +701,85 @@ func (p *Pane) Find(query string, fromAbs int, forward bool) (abs, col0, col1 in
 	defer p.mu.Unlock()
 	q := []rune(strings.ToLower(query))
 	total := p.scr.TotalLines()
-	var runes []rune
-	var cols []int
-
-	scan := func(start int, fwd bool) (int, int, int, bool) {
-		for i := 0; i < total; i++ {
-			var line int
-			if fwd {
-				line = start + 1 + i
-				if line >= total {
-					break
-				}
-			} else {
-				line = start - 1 - i
-				if line < 0 {
-					break
-				}
-			}
+	// KMP keeps repetitive queries linear in the number of visited runes.
+	prefix := make([]int, len(q))
+	for i, matched := 1, 0; i < len(q); i++ {
+		for matched > 0 && q[i] != q[matched] {
+			matched = prefix[matched-1]
+		}
+		if q[i] == q[matched] {
+			matched++
+		}
+		prefix[i] = matched
+	}
+	// Only the last query-length set of columns is needed to map a match.
+	columns := make([]int, len(q))
+	scan := func(start, end, step int) (int, int, int, bool) {
+		for line := start; line != end; line += step {
 			cells := p.scr.AbsLine(line)
-			runes, cols = runes[:0], cols[:0]
-			for col, cell := range cells {
-				for _, r := range cell.Text() {
-					runes, cols = append(runes, r), append(cols, col)
-				}
+			if c0, c1, ok := foldedCellIndex(cells, q, prefix, columns); ok {
+				return line, c0, c1, true
 			}
-			idx := runeIndexFold(runes, q)
-			if idx < 0 {
-				continue
-			}
-			return line, cols[idx], trailingColumn(cells, cols[idx+len(q)-1]), true
 		}
 		return 0, 0, 0, false
 	}
 
-	if abs, c0, c1, ok := scan(fromAbs, forward); ok {
+	// Split at the starting row so wrapping never scans a row twice.
+	if forward {
+		start := max(0, min(fromAbs, total-1)+1)
+		if abs, c0, c1, ok := scan(start, total, 1); ok {
+			return abs, c0, c1, true
+		}
+		return scan(0, start, 1)
+	}
+	start := max(0, min(fromAbs, total))
+	if abs, c0, c1, ok := scan(start-1, -1, -1); ok {
 		return abs, c0, c1, true
 	}
-	// Wrap around.
-	if forward {
-		return scan(-1, true)
-	}
-	return scan(total, false)
+	return scan(total-1, start-1, -1)
 }
 
-// runeIndexFold returns the rune index of needle (already lower-cased) in
-// haystack, ignoring case.
-func runeIndexFold(haystack, q []rune) int {
-	if len(q) == 0 || len(q) > len(haystack) {
-		return -1
+// foldedCellIndex searches a row without building strings or rune/column
+// arrays for the entire row. Combining runes keep their leading cell's column.
+func foldedCellIndex(cells []term.Cell, q []rune, prefix, columns []int) (int, int, bool) {
+	matched, next := 0, 0
+	consume := func(r rune, col int) bool {
+		columns[next] = col
+		next++
+		if next == len(columns) {
+			next = 0
+		}
+		r = unicode.ToLower(r)
+		for matched > 0 && r != q[matched] {
+			matched = prefix[matched-1]
+		}
+		if r == q[matched] {
+			matched++
+		}
+		return matched == len(q)
 	}
-	for i := 0; i+len(q) <= len(haystack); i++ {
-		match := true
-		for j, r := range q {
-			if unicode.ToLower(haystack[i+j]) != r {
-				match = false
-				break
+	for col, cell := range cells {
+		if cell.Cont {
+			continue
+		}
+		r := cell.R
+		if r == 0 {
+			r = ' '
+		} else if !utf8.ValidRune(r) {
+			r = utf8.RuneError
+		}
+		if consume(r, col) {
+			return columns[next], trailingColumn(cells, col), true
+		}
+		if cell.R != 0 {
+			for _, r := range cell.Combining {
+				if consume(r, col) {
+					return columns[next], trailingColumn(cells, col), true
+				}
 			}
 		}
-		if match {
-			return i
-		}
 	}
-	return -1
+	return 0, 0, false
 }
 
 // ScrollToAbs scrolls so the given absolute line is roughly centred.

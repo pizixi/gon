@@ -350,7 +350,7 @@ func (a *App) newPane(sh config.Shell, scope launch.Context, area image.Rectangl
 	})
 	go p.ReadLoop(func(chromeChanged bool) {
 		if chromeChanged || p.visible.Load() {
-			a.scheduleOutputFrame()
+			a.scheduleOutputFrame(p)
 		}
 	})
 	return p, nil
@@ -427,8 +427,19 @@ func (a *App) setActivePanesVisible(visible bool) {
 }
 
 // Coalesce PTY bursts independently of interactive input and layout changes.
-func (a *App) scheduleOutputFrame() {
-	if a.win == nil || a.minimized.Load() || !a.outputPending.CompareAndSwap(false, true) {
+func (a *App) scheduleOutputFrame(p *Pane) {
+	if a.win == nil || a.minimized.Load() {
+		return
+	}
+	// TUI selections are painted by the application after receiving mouse
+	// reports. Do not add the normal burst delay to that round trip. Gio
+	// already merges immediate invalidations; synchronized output still shows
+	// only completed application frames.
+	if p.visible.Load() && p.mouseInputRecent(time.Now()) {
+		a.invalidate()
+		return
+	}
+	if !a.outputPending.CompareAndSwap(false, true) {
 		return
 	}
 	time.AfterFunc(time.Second/30, func() {
