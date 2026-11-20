@@ -161,6 +161,40 @@ Write-Output "env=$env:GON_TEST_TAB_NAME,dir=$((Get-Item .).Name),only=$env:GON_
 	if first.Title() != "tab-FIRST" || second.Title() != "tab-SECOND" {
 		t.Fatalf("wrong PowerShell titles: %q / %q", first.Title(), second.Title())
 	}
+	h.frame()
+	h.controlBounds(t, "tab-FIRST", 0)
+	h.controlBounds(t, "tab-SECOND", 1)
+
+	firstTitle := "Administrator: " + first.sess.Executable()
+	first.applyOutput([]byte("\x1b]2;" + firstTitle + "\x07"))
+	second.applyOutput([]byte("\x1b]2;" + second.sess.Executable() + "\x07"))
+	h.size = image.Pt(config.MinWindowWidth, config.MinWindowHeight)
+	h.frame()
+	const firstLabel = "FIRST directory · pwsh 1"
+	h.controlBounds(t, firstLabel, 0)
+	h.controlBounds(t, "SECOND directory · pwsh 2", 0)
+	a.moveTab(0, 2)
+	h.frame()
+	row := h.controlBounds(t, firstLabel, 0)
+	h.mouse(pointer.Move, row.Min.Add(row.Size().Div(2)), 0)
+
+	wantTooltip := firstLabel + "\n启动目录  " + firstRequest.Dir + "\n原始标题  " + firstTitle
+	assertTooltipHidden := func() {
+		for _, node := range h.router.AppendSemantics(nil) {
+			if node.Desc.Label == wantTooltip {
+				t.Fatal("tab tooltip should be hidden")
+			}
+		}
+	}
+	assertTooltipHidden()
+	a.tabTooltipAt = time.Now().Add(-time.Second)
+	h.frame()
+	tip := h.controlBounds(t, wantTooltip, 0)
+	if tip.Min.X <= a.sidePx || !tip.In(image.Rectangle{Max: h.size}) {
+		t.Fatalf("tooltip bounds %v outside terminal area", tip)
+	}
+	h.mouse(pointer.Move, tip.Min, 0)
+	assertTooltipHidden()
 }
 
 func TestCloseFirstTabKeepsOtherShellRunning(t *testing.T) {

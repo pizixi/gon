@@ -200,6 +200,7 @@ func startPTY(command string, args []string, dir string, env []string, cols, row
 		return nil, nil, fmt.Errorf("CreateProcess: %w", err)
 	}
 	windows.CloseHandle(pi.Thread)
+	s.executable = exe
 
 	p := &conPTY{api: api, hpc: hpc, in: cmdIn, out: cmdOut, proc: pi.Process}
 

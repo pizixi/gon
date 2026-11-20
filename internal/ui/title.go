@@ -1,8 +1,11 @@
 package ui
 
 import (
+	"fmt"
 	"image"
 	"math"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gioui.org/io/semantic"
@@ -15,7 +18,13 @@ import (
 
 type terminalTitle struct {
 	name     string
+	native   bool
 	activity term.ProgressState
+}
+
+type tabLabel struct {
+	name, folder string
+	original     string
 }
 
 func (t *Tab) terminalTitle() terminalTitle {
@@ -26,7 +35,7 @@ func (t *Tab) terminalTitle() terminalTitle {
 	if pane := t.Focused(); pane != nil {
 		native, progress, exited := pane.titleStatus()
 		if native != "" {
-			return terminalTitle{name: native}
+			return terminalTitle{name: native, native: true}
 		}
 		if name := pane.ShellName(); name != "" {
 			title.name = name
@@ -39,6 +48,59 @@ func (t *Tab) terminalTitle() terminalTitle {
 		title.name = "终端"
 	}
 	return title
+}
+
+func (t *Tab) sidebarLabel(title terminalTitle) tabLabel {
+	label := tabLabel{name: title.name}
+	if pane := t.Focused(); pane != nil && pane.sess != nil {
+		exe := pane.sess.Executable()
+		if strings.EqualFold(filepath.Base(exe), "pwsh.exe") && (!title.native || isExecutableTitle(title.name, exe)) {
+			label.name = fmt.Sprintf("pwsh %d", t.ID)
+			if dir := pane.sess.StartingDirectory(); dir != "" {
+				label.folder = filepath.Base(dir)
+				if label.folder == string(filepath.Separator) {
+					label.folder = filepath.Clean(dir)
+				}
+			}
+			if title.native {
+				label.original = title.name
+			}
+		}
+	}
+	if len(t.Panes) > 1 {
+		label.name = fmt.Sprintf("%s (%d)", label.name, len(t.Panes))
+	}
+	return label
+}
+
+// isExecutableTitle recognizes a default console title by the full launch path.
+func isExecutableTitle(title, executable string) bool {
+	path := strings.TrimSpace(title)
+	for _, prefix := range []string{"Administrator:", "管理员:", "管理员："} {
+		if len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
+			path = strings.TrimSpace(path[len(prefix):])
+			break
+		}
+	}
+	path = strings.Trim(path, "\"")
+	return filepath.IsAbs(path) && strings.EqualFold(filepath.Clean(path), executable)
+}
+
+func (l tabLabel) full() string {
+	if l.folder == "" {
+		return l.name
+	}
+	return l.folder + " · " + l.name
+}
+
+func (a *App) fitTabLabel(label tabLabel, px, width int) string {
+	if label.folder != "" {
+		suffix := " · " + label.name
+		if folder := a.textFit(label.folder, px, width-a.textMeasure(suffix, px)); folder != "" {
+			return folder + suffix
+		}
+	}
+	return a.textFit(label.name, px, width)
 }
 
 func (t terminalTitle) caption() string {

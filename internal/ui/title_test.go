@@ -2,11 +2,42 @@ package ui
 
 import (
 	"image"
+	"strings"
 	"testing"
 
 	"gon/internal/config"
 	"gon/internal/term"
 )
+
+func TestExecutableTitleUsesFullPath(t *testing.T) {
+	const exe = `C:\Program Files\PowerShell\7\pwsh.exe`
+	for _, tc := range []struct {
+		title string
+		match bool
+	}{
+		{exe, true},
+		{` Administrator: "c:/program files/powershell/7/PWSH.EXE" `, true},
+		{"管理员: " + exe, true},
+		{"管理员：" + exe, true},
+		{"Review: " + exe, false},
+		{`Administrator: D:\PowerShell\pwsh.exe`, false},
+	} {
+		if got := isExecutableTitle(tc.title, exe); got != tc.match {
+			t.Errorf("isExecutableTitle(%q) = %t, want %t", tc.title, got, tc.match)
+		}
+	}
+}
+
+func TestTabLabelKeepsPowerShellNumberWhenFolderIsLong(t *testing.T) {
+	a := New(config.Default(), nil, "")
+	defer a.shutdown()
+	const px = 13
+	const want = "… · pwsh 2"
+	label := tabLabel{name: "pwsh 2", folder: strings.Repeat("项目", 30)}
+	if got := a.fitTabLabel(label, px, a.textMeasure(want, px)); got != want {
+		t.Fatalf("fitted label = %q, want %q", got, want)
+	}
+}
 
 func TestTabTitlesPreserveOSC(t *testing.T) {
 	cfg := config.Default()

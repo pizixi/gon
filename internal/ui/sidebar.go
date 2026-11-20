@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"image"
 	"slices"
 	"time"
@@ -106,6 +105,8 @@ func (a *App) drawSidebar(gtx layout.Context, area image.Rectangle, list sidebar
 	}
 	if !list.area.Empty() {
 		px := a.uiPx(gtx, 13)
+		var hoverRow image.Rectangle
+		var hoverLabel tabLabel
 		stack := clip.Rect(list.area).Push(gtx.Ops)
 		event.Op(gtx.Ops, sidebarScrollTag{})
 		for i, tab := range a.tabs {
@@ -114,15 +115,20 @@ func (a *App) drawSidebar(gtx layout.Context, area image.Rectangle, list sidebar
 				break
 			}
 			if row.Max.Y > list.area.Min.Y {
-				label := title
+				tabTitle := title
 				if tab != active {
-					label = tab.terminalTitle()
+					tabTitle = tab.terminalTitle()
 				}
-				a.drawTabRow(gtx, row, tab, label, tab == active, px)
+				label := tab.sidebarLabel(tabTitle)
+				a.drawTabRow(gtx, row, tab, tabTitle, label, tab == active, px)
+				if tab == a.hoverTab {
+					hoverRow, hoverLabel = row.Intersect(list.area), label
+				}
 			}
 		}
 		a.drawTabDrag(gtx, list, px)
 		stack.Pop()
+		a.drawTabTooltip(gtx, hoverRow, area.Max.X, hoverLabel)
 	}
 }
 
@@ -144,6 +150,7 @@ func (a *App) updateTabInput(gtx layout.Context, list sidebarList) {
 			case pointer.Enter:
 				if e.Source == pointer.Mouse {
 					a.hoverTab = tab
+					a.tabTooltipAt = gtx.Now.Add(tabTooltipDelay)
 				}
 			case pointer.Leave:
 				if e.Source == pointer.Mouse && a.hoverTab == tab {
@@ -177,6 +184,7 @@ func (a *App) updateTabInput(gtx layout.Context, list sidebarList) {
 				if e.Kind != pointer.Release {
 					continue
 				}
+				a.tabTooltipAt = gtx.Now.Add(tabTooltipDelay)
 				moving := drag.moving
 				a.tabDrag = tabDrag{}
 				if moving && pos.In(list.area) {
@@ -244,18 +252,11 @@ func (a *App) updateTabScroll(gtx layout.Context, list sidebarList) {
 	}
 }
 
-func tabLabel(tab *Tab, title string) string {
-	if len(tab.Panes) > 1 {
-		return fmt.Sprintf("%s (%d)", title, len(tab.Panes))
-	}
-	return title
-}
-
 func tabCloseBounds(gtx layout.Context, row image.Rectangle) image.Rectangle {
 	return image.Rect(row.Max.X-gtx.Dp(26), row.Min.Y+gtx.Dp(5), row.Max.X-gtx.Dp(3), row.Max.Y-gtx.Dp(5))
 }
 
-func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, title terminalTitle, active bool, px int) {
+func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, title terminalTitle, label tabLabel, active bool, px int) {
 	defer clip.Rect(row).Push(gtx.Ops).Pop()
 	hover := a.hoverTab == tab
 	dragged := a.tabDrag.moving && a.tabDrag.tab == tab
@@ -263,7 +264,6 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 		alpha := uint8(condColor(active && !dragged, 0x08, 0x04))
 		paint.FillShape(gtx.Ops, NRGBA(a.theme.Fg, alpha), clip.UniformRRect(row, gtx.Dp(6)).Op(gtx.Ops))
 	}
-	label := tabLabel(tab, title.name)
 	if gtx.Enabled() {
 		cursor := pointer.CursorPointer
 		if len(a.tabs) > 1 {
@@ -273,7 +273,7 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 			cursor = pointer.CursorGrabbing
 		}
 		cursor.Add(gtx.Ops)
-		semantic.LabelOp(label).Add(gtx.Ops)
+		semantic.LabelOp(label.full()).Add(gtx.Ops)
 		semantic.SelectedOp(active).Add(gtx.Ops)
 		semantic.Button.Add(gtx.Ops)
 		event.Op(gtx.Ops, tabTag{tab: tab})
@@ -282,7 +282,8 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	close := tabCloseBounds(gtx, row)
 	col := condColor((active || hover) && !dragged, a.theme.Fg, a.theme.Dim)
 	x, baseline := row.Min.X+gtx.Dp(10), (row.Min.Y+row.Max.Y+a.textAscent(px))/2
-	a.drawText(gtx, a.textFit(label, px, close.Min.X-x-gtx.Dp(4)), x, baseline, px, a.titleColor(gtx, title, col), 0xff)
+	fitted := a.fitTabLabel(label, px, close.Min.X-x-gtx.Dp(4))
+	a.drawText(gtx, fitted, x, baseline, px, a.titleColor(gtx, title, col), 0xff)
 	tab.closeShown = hover && !dragged && gtx.Enabled()
 	if tab.closeShown {
 		a.drawIconButton(gtx, close, &tab.closeButton, "关闭标签页", drawCloseIcon)
@@ -302,7 +303,7 @@ func (a *App) drawTabDrag(gtx layout.Context, list sidebarList, px int) {
 	paint.FillShape(gtx.Ops, NRGBA(mix(a.theme.Panel, a.theme.Fg, 0.13), 0xff), shape.Op(gtx.Ops))
 	pad := gtx.Dp(10)
 	title := drag.tab.terminalTitle()
-	label := a.textFit(tabLabel(drag.tab, title.name), px, card.Dx()-2*pad)
+	label := a.fitTabLabel(drag.tab.sidebarLabel(title), px, card.Dx()-2*pad)
 	a.drawText(gtx, label, card.Min.X+pad, (card.Min.Y+card.Max.Y+a.textAscent(px))/2, px, a.titleColor(gtx, title, a.theme.Fg), 0xff)
 
 	y := list.row(list.insertion(drag.at.Y, a.sideScroll, len(a.tabs)), a.sideScroll).Min.Y - list.gap/2

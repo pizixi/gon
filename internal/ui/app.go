@@ -100,6 +100,7 @@ type App struct {
 	sidebarToggle widget.Clickable
 	newTabButton  widget.Clickable
 	hoverTab      *Tab
+	tabTooltipAt  time.Time
 	tabDrag       tabDrag
 
 	searchOpen  bool

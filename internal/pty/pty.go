@@ -18,6 +18,9 @@ type Session struct {
 	once     sync.Once
 	doneOnce sync.Once
 	mu       sync.Mutex
+
+	executable  string
+	startingDir string
 	// alive is false once the shell has exited.
 	alive bool
 	exit  int
@@ -70,7 +73,7 @@ func StartWithOptions(command string, args []string, options Options, cols, rows
 		}
 	}
 
-	s := &Session{done: make(chan struct{}), alive: true, exit: -1}
+	s := &Session{done: make(chan struct{}), alive: true, exit: -1, startingDir: dir}
 	p, closer, err := startPTY(command, args, dir, env, cols, rows, s)
 	if err != nil {
 		return nil, err
@@ -79,6 +82,12 @@ func StartWithOptions(command string, args []string, options Options, cols, rows
 	s.closer = closer
 	return s, nil
 }
+
+// Executable returns the resolved path of the program started in the console.
+func (s *Session) Executable() string { return s.executable }
+
+// StartingDirectory returns the working directory used to start the program.
+func (s *Session) StartingDirectory() string { return s.startingDir }
 
 func isDir(path string) bool {
 	info, err := os.Stat(path)
