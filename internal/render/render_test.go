@@ -8,6 +8,7 @@ import (
 	"gioui.org/io/input"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
 
 	"gon/internal/fontset"
 	"gon/internal/term"
@@ -25,6 +26,19 @@ func testView(t *testing.T) *View {
 	v := NewView(fam, 16)
 	v.Pal = term.NewPalette(0xe0e0e0, 0x101010)
 	return v
+}
+
+func TestPowerlineGlyphsRecordOps(t *testing.T) {
+	var ops op.Ops
+	gtx := layout.Context{Ops: &ops}
+	viewport := clip.Rect(image.Rect(0, 0, 48, 20)).Push(&ops)
+	for col, glyph := range []rune{'\ue0b0', '\ue0b1', '\ue0b2', '\ue0b3'} {
+		cell := image.Rect(col*12, 0, (col+1)*12, 20)
+		if !drawGridGlyph(gtx, glyph, cell, 0xffffff) {
+			t.Fatalf("glyph %U was not drawn", glyph)
+		}
+	}
+	viewport.Pop()
 }
 
 func TestMetricsAreSane(t *testing.T) {

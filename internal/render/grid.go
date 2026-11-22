@@ -199,7 +199,10 @@ func drawPowerline(gtx layout.Context, r rune, cell image.Rectangle, color uint3
 		path.Close()
 		paint.FillShape(gtx.Ops, rgb(color), clip.Outline{Path: path.End()}.Op())
 	} else {
-		defer clip.Rect(cell).Push(gtx.Ops).Pop()
-		paint.FillShape(gtx.Ops, rgb(color), clip.Stroke{Path: path.End(), Width: 1}.Op())
+		// Finish recording the path before writing the cell clip to Gio's ops.
+		stroke := clip.Stroke{Path: path.End(), Width: 1}
+		bounds := clip.Rect(cell).Push(gtx.Ops)
+		paint.FillShape(gtx.Ops, rgb(color), stroke.Op())
+		bounds.Pop()
 	}
 }
