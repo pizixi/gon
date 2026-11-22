@@ -37,6 +37,15 @@ func (t *Text) Ascent(px int) int {
 	return v
 }
 
+// CapHeight returns the height of a capital letter above the baseline.
+func (t *Text) CapHeight(px int) int {
+	nom := t.family.Nominal()
+	if nom == nil || nom.Upem <= 0 {
+		return max(1, (px*72+50)/100)
+	}
+	return max(1, int(nom.CapHeight/nom.Upem*float32(px)+0.5))
+}
+
 // LineHeight approximates the natural line height at px.
 func (t *Text) LineHeight(px int) int { return t.Ascent(px) + px/4 }
 

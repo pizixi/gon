@@ -36,16 +36,17 @@ func (a *App) drawTabTooltip(gtx layout.Context, row image.Rectangle, sidebarRig
 
 	full := label.full()
 	details := []string{full}
-	if label.elevated {
-		details = append(details, "管理员权限")
-	}
 	if pane := a.hoverTab.Focused(); pane != nil && pane.sess != nil {
-		if dir := pane.sess.StartingDirectory(); dir != "" {
+		sess := pane.sess
+		if sess.Elevated() {
+			details = append(details, "管理员权限")
+		}
+		if dir := sess.StartingDirectory(); dir != "" {
 			details = append(details, "启动目录  "+dir)
 		}
 		if label.original != "" {
 			details = append(details, "原始标题  "+label.original)
-		} else if exe := pane.sess.Executable(); exe != "" && !strings.Contains(full, exe) {
+		} else if exe := sess.Executable(); exe != "" && !strings.Contains(full, exe) {
 			details = append(details, "程序  "+exe)
 		}
 	}

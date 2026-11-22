@@ -148,6 +148,36 @@ func TestWindowControlsLeaveTitleBarDraggable(t *testing.T) {
 	}
 }
 
+func TestTitleBarUsesSpaceBesideSidebarControls(t *testing.T) {
+	a := New(config.Default(), nil, "")
+	defer a.shutdown()
+	a.started = true
+	caption := strings.Repeat("项目构建 / release · ", 14)
+	tab := &Tab{Title: caption}
+	tab.addPane(newInputPane(), SplitRight)
+	a.tabs = []*Tab{tab}
+	a.activateTab(0)
+
+	for _, scale := range []float32{1, 1.5} {
+		size := image.Pt(int(config.MinWindowWidth*scale), int(config.MinWindowHeight*scale))
+		h := &layoutTest{App: a, size: size, metric: unit.Metric{PxPerDp: scale, PxPerSp: scale}}
+		h.frame()
+		plus := h.controlBounds(t, "新建标签页", 0)
+		minimize := h.controlBounds(t, "最小化", 0)
+		header := h.controlBounds(t, caption, 0)
+		if header.Min.X < plus.Max.X || header.Min.X >= a.paneArea().Min.X || header.Max.X > minimize.Min.X {
+			t.Fatalf("at scale %g title %v is outside the space between %v and %v", scale, header, plus, minimize)
+		}
+		if header.Dx() <= minimize.Min.X-a.paneArea().Min.X {
+			t.Fatalf("at scale %g title did not use the reclaimed space: %v", scale, header)
+		}
+		center := plus.Min.Add(plus.Size().Div(2))
+		if action, _ := h.router.ActionAt(f32.Pt(float32(center.X), float32(center.Y))); action == system.ActionMove {
+			t.Fatal("the drag region overlaps the new tab button")
+		}
+	}
+}
+
 func TestSidebarToggleExpandsTerminal(t *testing.T) {
 	a := New(config.Default(), nil, "")
 	a.started = true
@@ -159,8 +189,9 @@ func TestSidebarToggleExpandsTerminal(t *testing.T) {
 	h := &layoutTest{App: a, size: image.Pt(900, 601)}
 	h.frame()
 	before := a.paneArea()
+	toggle := h.controlBounds(t, "隐藏侧栏", 0)
 	plus := h.controlBounds(t, "新建标签页", 0)
-	if plus.Max.X >= before.Min.X || plus.Min.X <= before.Min.X/2 || plus.Max.Y > a.hdrH {
+	if plus.Max.X >= before.Min.X || plus.Min.X != toggle.Max.X+3 || plus.Max.Y > a.hdrH {
 		t.Fatalf("new tab control is outside the sidebar header: %v", plus)
 	}
 	h.clickControl(t, "隐藏侧栏", 0)

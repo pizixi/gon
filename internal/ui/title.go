@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 
 	"gon/internal/config"
 	"gon/internal/term"
@@ -22,13 +24,13 @@ var defaultShellProfiles = config.Default().Shells
 type terminalTitle struct {
 	name     string
 	native   bool
+	elevated bool
 	activity term.ProgressState
 }
 
 type tabLabel struct {
 	name, folder string
 	original     string
-	elevated     bool
 }
 
 func (t *Tab) terminalTitle() terminalTitle {
@@ -37,9 +39,11 @@ func (t *Tab) terminalTitle() terminalTitle {
 	}
 	title := terminalTitle{name: t.Title}
 	if pane := t.Focused(); pane != nil {
+		title.elevated = pane.sess != nil && pane.sess.Elevated()
 		native, progress, exited := pane.titleStatus()
 		if native != "" {
-			return terminalTitle{name: native, native: true}
+			title.name, title.native = native, true
+			return title
 		}
 		if name := pane.ShellName(); name != "" {
 			title.name = name
@@ -58,9 +62,8 @@ func (t *Tab) sidebarLabel(title terminalTitle) tabLabel {
 	label := tabLabel{name: title.name}
 	if pane := t.Focused(); pane != nil && pane.sess != nil {
 		sess := pane.sess
-		label.elevated = sess.Elevated()
 		if shell := sidebarShellName(sess.Executable(), pane.ShellName(), title); shell != "" {
-			label.name = fmt.Sprintf("%s %d", shell, t.ID)
+			label.name = shell
 			if dir := sess.StartingDirectory(); dir != "" {
 				label.folder = filepath.Base(dir)
 				if label.folder == string(filepath.Separator) {
@@ -125,13 +128,6 @@ func (l tabLabel) full() string {
 	return l.folder + " · " + l.name
 }
 
-func (l tabLabel) accessibleName() string {
-	if l.elevated {
-		return "管理员权限 · " + l.full()
-	}
-	return l.full()
-}
-
 func (a *App) fitTabLabel(label tabLabel, px, width int) string {
 	if label.folder != "" {
 		suffix := " · " + label.name
@@ -160,21 +156,56 @@ func (a *App) updateWindowTitle(title terminalTitle) {
 	}
 }
 
-func (a *App) drawCenteredTitle(gtx layout.Context, bar image.Rectangle, left, right int, title terminalTitle) {
-	if right <= left {
+func (a *App) drawCenteredTitle(gtx layout.Context, area image.Rectangle, title terminalTitle) {
+	if area.Empty() {
 		return
 	}
+	defer clip.Rect(area).Push(gtx.Ops).Pop()
 	px := a.uiPx(gtx, 13)
-	fitted := a.textFit(title.caption(), px, right-left)
-	w := a.textMeasure(fitted, px)
-	x := max(left, min(right-w, bar.Min.X+(bar.Dx()-w)/2))
-	if !a.settings.open && title.name != "" && w > 0 {
-		r := image.Rect(x, bar.Min.Y, x+w, bar.Max.Y)
-		area := clip.Rect(r).Push(gtx.Ops)
-		semantic.LabelOp(title.name).Add(gtx.Ops)
-		area.Pop()
+	capHeight := a.view.TextRenderer().CapHeight(px)
+	baseline := area.Min.Y + (area.Dy()+capHeight)/2
+	shieldWidth, shieldGap := 0, 0
+	if title.elevated && area.Dx() >= gtx.Dp(17) {
+		shieldWidth, shieldGap = gtx.Dp(12), gtx.Dp(5)
 	}
-	a.drawText(gtx, fitted, x, (bar.Min.Y+bar.Max.Y+a.textAscent(px))/2, px, a.titleColor(gtx, title, a.theme.Fg), 0xff)
+	shieldSpace := shieldWidth + shieldGap
+	fitted := a.textFit(title.caption(), px, area.Dx()-shieldSpace)
+	w := a.textMeasure(fitted, px)
+	x := area.Min.X + (area.Dx()-w-shieldSpace)/2
+	if shieldWidth > 0 {
+		center := image.Pt(x+shieldWidth/2, baseline-capHeight/2)
+		drawAdminShield(gtx, center, mix(a.theme.Accent, a.theme.Fg, 0.23))
+		if !a.settings.open {
+			h := gtx.Dp(7)
+			r := image.Rect(x, center.Y-h, x+shieldWidth, center.Y+h)
+			stack := clip.Rect(r).Push(gtx.Ops)
+			semantic.LabelOp("管理员权限").Add(gtx.Ops)
+			stack.Pop()
+		}
+		x += shieldSpace
+	}
+	if !a.settings.open && title.name != "" && w > 0 {
+		r := image.Rect(x, area.Min.Y, x+w, area.Max.Y)
+		stack := clip.Rect(r).Push(gtx.Ops)
+		semantic.LabelOp(title.name).Add(gtx.Ops)
+		stack.Pop()
+	}
+	a.drawText(gtx, fitted, x, baseline, px, a.titleColor(gtx, title, a.theme.Fg), 0xff)
+}
+
+func drawAdminShield(gtx layout.Context, center image.Point, col uint32) {
+	x, y := float32(center.X), float32(center.Y)
+	w, h := float32(gtx.Dp(5)), float32(gtx.Dp(6))
+	var path clip.Path
+	path.Begin(gtx.Ops)
+	path.MoveTo(f32.Pt(x, y-h))
+	path.LineTo(f32.Pt(x+w, y-h*0.67))
+	path.LineTo(f32.Pt(x+w, y))
+	path.QuadTo(f32.Pt(x+w, y+h*0.55), f32.Pt(x, y+h))
+	path.QuadTo(f32.Pt(x-w, y+h*0.55), f32.Pt(x-w, y))
+	path.LineTo(f32.Pt(x-w, y-h*0.67))
+	path.Close()
+	paint.FillShape(gtx.Ops, NRGBA(col, 0xff), clip.Stroke{Path: path.End(), Width: float32(gtx.Dp(1))}.Op())
 }
 
 func (a *App) titleColor(gtx layout.Context, title terminalTitle, base uint32) uint32 {

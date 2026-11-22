@@ -52,9 +52,7 @@ func waitText(t *testing.T, p *Pane, want string, d time.Duration) bool {
 func (h *layoutTest) shellSidebarRow(t *testing.T, label string, alsoInHeader bool) image.Rectangle {
 	t.Helper()
 	index := 0
-	if windows.GetCurrentProcessToken().IsElevated() {
-		label = "管理员权限 · " + label
-	} else if alsoInHeader {
+	if alsoInHeader {
 		index = 1
 	}
 	row := h.controlBounds(t, label, index)
@@ -143,7 +141,7 @@ func TestConfiguredShellSidebarLabel(t *testing.T) {
 		t.Fatal("the configured shell did not start")
 	}
 
-	label := filepath.Base(dir) + " · Dev Shell 1"
+	label := filepath.Base(dir) + " · Dev Shell"
 	pane.applyOutput([]byte("\x1b]2;" + command + "\x07"))
 	h.frame()
 	h.shellSidebarRow(t, label, false)
@@ -249,15 +247,30 @@ Write-Output "env=$env:GON_TEST_TAB_NAME,dir=$((Get-Item .).Name),only=$env:GON_
 	h.frame()
 	h.shellSidebarRow(t, "tab-FIRST", false)
 	h.shellSidebarRow(t, "tab-SECOND", true)
+	var shields []image.Rectangle
+	for _, node := range h.router.AppendSemantics(nil) {
+		if node.Desc.Label == "管理员权限" {
+			shields = append(shields, node.Desc.Bounds)
+		}
+	}
+	if windows.GetCurrentProcessToken().IsElevated() {
+		header := h.controlBounds(t, "tab-SECOND", 0)
+		if len(shields) != 1 || shields[0].Max.X > header.Min.X ||
+			iabs(shields[0].Min.Y+shields[0].Max.Y-header.Min.Y-header.Max.Y) > 2 {
+			t.Fatalf("expected one shield centered beside the active title %v, got %v", header, shields)
+		}
+	} else if len(shields) != 0 {
+		t.Fatalf("ordinary session has an administrator shield: %v", shields)
+	}
 
 	firstTitle := "管理员:Administrator:" + first.sess.Executable()
 	first.applyOutput([]byte("\x1b]2;" + firstTitle + "\x07"))
 	second.applyOutput([]byte("\x1b]2;" + second.sess.Executable() + "\x07"))
 	h.size = image.Pt(config.MinWindowWidth, config.MinWindowHeight)
 	h.frame()
-	const firstLabel = "FIRST directory · pwsh 1"
+	const firstLabel = "FIRST directory · pwsh"
 	h.shellSidebarRow(t, firstLabel, false)
-	h.shellSidebarRow(t, "SECOND directory · pwsh 2", false)
+	h.shellSidebarRow(t, "SECOND directory · pwsh", false)
 	a.moveTab(0, 2)
 	h.frame()
 	row := h.shellSidebarRow(t, firstLabel, false)

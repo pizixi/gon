@@ -73,7 +73,7 @@ func (a *App) updateSidebarButtons(gtx layout.Context) {
 	}
 }
 
-func (a *App) drawSidebarButtons(gtx layout.Context, width, height int) {
+func (a *App) drawSidebarButtons(gtx layout.Context, height int) int {
 	if a.settings.open {
 		gtx = gtx.Disabled()
 	}
@@ -83,10 +83,11 @@ func (a *App) drawSidebarButtons(gtx layout.Context, width, height int) {
 		label = "展开侧栏"
 	}
 	a.drawIconButton(gtx, r, &a.sidebarToggle, label, drawSidebarIcon)
-	if width > 0 {
-		r = r.Add(image.Pt(width-r.Max.X-gtx.Dp(6), 0))
+	if !a.sidebarHidden {
+		r = r.Add(image.Pt(r.Dx()+gtx.Dp(3), 0))
 		a.drawIconButton(gtx, r, &a.newTabButton, "新建标签页", drawPlusIcon)
 	}
+	return r.Max.X
 }
 
 func (a *App) sidebarTabs(gtx layout.Context, area image.Rectangle) sidebarList {
@@ -98,7 +99,7 @@ func (a *App) sidebarTabs(gtx layout.Context, area image.Rectangle) sidebarList 
 }
 
 func (a *App) drawSidebar(gtx layout.Context, area image.Rectangle, list sidebarList, active *Tab, title terminalTitle) {
-	line := image.Rect(area.Max.X-1, area.Min.Y, area.Max.X, area.Max.Y)
+	line := image.Rect(area.Max.X-1, min(area.Max.Y, a.hdrH), area.Max.X, area.Max.Y)
 	paint.FillShape(gtx.Ops, NRGBA(a.theme.Fg, 0x06), clip.Rect(line).Op())
 	if a.settings.open {
 		gtx = gtx.Disabled()
@@ -265,7 +266,7 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	hover := a.hoverTab == tab
 	dragged := a.tabDrag.moving && a.tabDrag.tab == tab
 	if active || hover {
-		alpha := uint8(condColor(active && !dragged, 0x08, 0x04))
+		alpha := uint8(condColor(active && !dragged, 0x08, 0x06))
 		paint.FillShape(gtx.Ops, NRGBA(a.theme.Fg, alpha), clip.UniformRRect(row, gtx.Dp(6)).Op(gtx.Ops))
 	}
 	if gtx.Enabled() {
@@ -277,7 +278,7 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 			cursor = pointer.CursorGrabbing
 		}
 		cursor.Add(gtx.Ops)
-		semantic.LabelOp(label.accessibleName()).Add(gtx.Ops)
+		semantic.LabelOp(label.full()).Add(gtx.Ops)
 		semantic.SelectedOp(active).Add(gtx.Ops)
 		semantic.Button.Add(gtx.Ops)
 		event.Op(gtx.Ops, tabTag{tab: tab})
@@ -286,8 +287,8 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	close := tabCloseBounds(gtx, row)
 	col := condColor((active || hover) && !dragged, a.theme.Fg, a.theme.Dim)
 	labelArea := row
-	labelArea.Min.X += gtx.Dp(10)
-	labelArea.Max.X = close.Min.X - gtx.Dp(4)
+	labelArea.Min.X += gtx.Dp(7)
+	labelArea.Max.X = close.Min.X - gtx.Dp(3)
 	a.drawTabLabel(gtx, labelArea, label, title, px, col)
 	tab.closeShown = hover && !dragged && gtx.Enabled()
 	closeContext := gtx
@@ -310,7 +311,7 @@ func (a *App) drawTabDrag(gtx layout.Context, list sidebarList, px int) {
 	shadow := clip.UniformRRect(card.Add(image.Pt(0, gtx.Dp(3))), gtx.Dp(7))
 	paint.FillShape(gtx.Ops, NRGBA(0, 0x54), shadow.Op(gtx.Ops))
 	paint.FillShape(gtx.Ops, NRGBA(mix(a.theme.Panel, a.theme.Fg, 0.13), 0xff), shape.Op(gtx.Ops))
-	pad := gtx.Dp(10)
+	pad := gtx.Dp(7)
 	title := drag.tab.terminalTitle()
 	labelArea := card
 	labelArea.Min.X += pad
@@ -327,15 +328,9 @@ func (a *App) drawTabLabel(gtx layout.Context, area image.Rectangle, label tabLa
 	if area.Empty() {
 		return
 	}
-	x := area.Min.X
-	if label.elevated {
-		center := image.Pt(x+gtx.Dp(6), (area.Min.Y+area.Max.Y)/2)
-		drawAdminShield(gtx, center, a.theme.Accent)
-		x += gtx.Dp(16)
-	}
-	fitted := a.fitTabLabel(label, px, area.Max.X-x)
-	baseline := (area.Min.Y + area.Max.Y + a.textAscent(px)) / 2
-	a.drawText(gtx, fitted, x, baseline, px, a.titleColor(gtx, title, col), 0xff)
+	fitted := a.fitTabLabel(label, px, area.Dx())
+	baseline := area.Min.Y + (area.Dy()+a.view.TextRenderer().CapHeight(px))/2
+	a.drawText(gtx, fitted, area.Min.X, baseline, px, a.titleColor(gtx, title, col), 0xff)
 }
 
 func (a *App) drawIconButton(gtx layout.Context, r image.Rectangle, button *widget.Clickable, label string, icon func(layout.Context, image.Point, uint32)) {
@@ -363,21 +358,6 @@ func (a *App) layoutIconButton(gtx layout.Context, r image.Rectangle, button *wi
 		icon(gtx, r.Size(), col)
 		return layout.Dimensions{Size: r.Size()}
 	})
-}
-
-func drawAdminShield(gtx layout.Context, center image.Point, col uint32) {
-	x, y := float32(center.X), float32(center.Y)
-	w, h := float32(gtx.Dp(5)), float32(gtx.Dp(6))
-	var path clip.Path
-	path.Begin(gtx.Ops)
-	path.MoveTo(f32.Pt(x, y-h))
-	path.LineTo(f32.Pt(x+w, y-h*0.67))
-	path.LineTo(f32.Pt(x+w, y))
-	path.QuadTo(f32.Pt(x+w, y+h*0.55), f32.Pt(x, y+h))
-	path.QuadTo(f32.Pt(x-w, y+h*0.55), f32.Pt(x-w, y))
-	path.LineTo(f32.Pt(x-w, y-h*0.67))
-	path.Close()
-	paint.FillShape(gtx.Ops, NRGBA(col, 0xff), clip.Stroke{Path: path.End(), Width: float32(gtx.Dp(1))}.Op())
 }
 
 func drawSidebarIcon(gtx layout.Context, size image.Point, col uint32) {

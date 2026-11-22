@@ -12,7 +12,6 @@ import (
 
 // Tab holds the terminal sessions and their split layout.
 type Tab struct {
-	ID    uint64
 	Title string
 	// Panes keeps creation order for focus cycling.
 	Panes       []*Pane

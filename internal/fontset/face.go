@@ -20,13 +20,14 @@ import (
 // Face loads outlines from disk on demand. It uses the full OpenType loader
 // for fonts that the smaller SFNT reader cannot parse.
 type Face struct {
-	Name    string
-	Path    string
-	Index   uint16
-	Upem    float32
-	Ascent  float32
-	Descent float32
-	Bold    bool
+	Name      string
+	Path      string
+	Index     uint16
+	Upem      float32
+	Ascent    float32
+	Descent   float32
+	CapHeight float32
+	Bold      bool
 
 	mu         sync.Mutex
 	file       *os.File
@@ -66,6 +67,7 @@ func loadFace(id font.FontID) (*Face, error) {
 			if err == nil {
 				face.Ascent = float32(metrics.Ascent) / 64
 				face.Descent = -float32(metrics.Descent) / 64
+				face.CapHeight = float32(metrics.CapHeight) / 64
 			}
 			face.normalizeMetrics()
 			return face, nil
@@ -93,6 +95,7 @@ func loadFace(id font.FontID) (*Face, error) {
 	if ext, ok := face.full.FontHExtents(); ok {
 		face.Ascent, face.Descent = ext.Ascender, ext.Descender
 	}
+	face.CapHeight = face.full.LineMetric(font.CapHeight)
 	face.normalizeMetrics()
 	return face, nil
 }
@@ -202,6 +205,9 @@ func (f *Face) normalizeMetrics() {
 	}
 	if f.Descent >= 0 {
 		f.Descent = -f.Upem * 0.2
+	}
+	if f.CapHeight <= 0 {
+		f.CapHeight = f.Upem * 0.72
 	}
 }
 

@@ -52,7 +52,6 @@ type App struct {
 
 	tabs   []*Tab
 	active int
-	nextID uint64
 
 	hdrH int
 	pad  int
@@ -316,8 +315,7 @@ func (a *App) newTab(sh config.Shell, scope launch.Context) (*Tab, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.nextID++
-	t := &Tab{ID: a.nextID, Title: p.ShellName(), launch: scope}
+	t := &Tab{Title: p.ShellName(), launch: scope}
 	t.addPane(p, SplitRight)
 	a.tabs = append(a.tabs, t)
 	a.activateTab(len(a.tabs) - 1)
@@ -676,8 +674,7 @@ drained:
 	if !sidebarRect.Empty() {
 		a.drawSidebar(gtx, sidebarRect, list, active, title)
 	}
-	a.drawTitleBar(gtx, image.Rect(termRect.Min.X, 0, size.X, termRect.Min.Y), title)
-	a.drawSidebarButtons(gtx, termRect.Min.X, termRect.Min.Y)
+	a.drawTitleBar(gtx, image.Rect(0, 0, size.X, termRect.Min.Y), title)
 	a.drawSearch(gtx, termRect)
 	a.drawToast(gtx, size)
 	a.drawMenu(gtx, size, sidebarRect)
@@ -760,11 +757,8 @@ func (a *App) drawTitleBar(gtx layout.Context, bar image.Rectangle, title termin
 		buttons[1].label = "还原"
 		buttons[1].action = system.ActionUnmaximize
 	}
-	moveLeft := bar.Min.X
-	if a.sidebarHidden {
-		moveLeft = min(bar.Max.X, sidebarButtonBounds(gtx, bar.Dy()).Max.X+gtx.Dp(6))
-	}
-	btnW := min(gtx.Dp(46), (bar.Max.X-moveLeft)/len(buttons))
+	moveLeft := min(bar.Max.X, a.drawSidebarButtons(gtx, bar.Dy()))
+	btnW := min(gtx.Dp(titleBarHeight), (bar.Max.X-moveLeft)/len(buttons))
 	btnLeft := bar.Max.X - len(buttons)*btnW
 	if !a.closeDialog.open && !a.fullscreen {
 		area := clip.Rect(image.Rect(moveLeft, bar.Min.Y, btnLeft, bar.Max.Y)).Push(gtx.Ops)
@@ -773,7 +767,10 @@ func (a *App) drawTitleBar(gtx layout.Context, bar image.Rectangle, title termin
 		area.Pop()
 	}
 
-	a.drawCenteredTitle(gtx, bar, moveLeft+gtx.Dp(8), btnLeft-gtx.Dp(8), title)
+	titleArea := bar
+	titleArea.Min.X = moveLeft + gtx.Dp(5)
+	titleArea.Max.X = btnLeft - gtx.Dp(5)
+	a.drawCenteredTitle(gtx, titleArea, title)
 	for i, item := range buttons {
 		x := btnLeft + i*btnW
 		a.drawWinButton(gtx, image.Rect(x, bar.Min.Y, x+btnW, bar.Max.Y), &a.winButtons[i], item.label, item.action)

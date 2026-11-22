@@ -67,12 +67,12 @@ func TestSidebarShellName(t *testing.T) {
 	}
 }
 
-func TestTabLabelKeepsPowerShellNumberWhenFolderIsLong(t *testing.T) {
+func TestTabLabelKeepsShellNameWhenFolderIsLong(t *testing.T) {
 	a := New(config.Default(), nil, "")
 	defer a.shutdown()
 	const px = 13
-	const want = "… · pwsh 2"
-	label := tabLabel{name: "pwsh 2", folder: strings.Repeat("项目", 30)}
+	const want = "… · pwsh"
+	label := tabLabel{name: "pwsh", folder: strings.Repeat("项目", 30)}
 	if got := a.fitTabLabel(label, px, a.textMeasure(want, px)); got != want {
 		t.Fatalf("fitted label = %q, want %q", got, want)
 	}
@@ -101,13 +101,14 @@ func TestTabTitlesPreserveOSC(t *testing.T) {
 	h.controlBounds(t, working, 0)
 	a.activateTab(1)
 	for _, title := range []string{
-		working, "◑  Review internal/ui ", "✳  Review internal/ui ",
+		working, "◑  Review internal/ui ", "✳  Review internal/ui 2",
 		` Administrator: C:\Windows\System32\cmd.exe `,
 	} {
 		agent.applyOutput([]byte("\x1b]2;" + title + "\x1b\\"))
 		h.frame()
 		header, row := h.controlBounds(t, title, 0), h.controlBounds(t, title, 1)
-		if header.Min.X < a.sidePx || row.Max.X > a.sidePx {
+		plus := h.controlBounds(t, "新建标签页", 0)
+		if header.Min.X < plus.Max.X || row.Max.X > a.sidePx {
 			t.Fatalf("the title %q was not rendered in both places", title)
 		}
 		if got := second.terminalTitle(); got.caption() != title || got.activity != term.ProgressHidden {
