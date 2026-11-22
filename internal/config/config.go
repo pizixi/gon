@@ -4,8 +4,10 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Shell describes one entry in the "new tab" list.
@@ -14,6 +16,44 @@ type Shell struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
 	Dir     string   `json:"dir,omitempty"`
+	extra   map[string]json.RawMessage
+}
+
+type shellJSON Shell
+
+// UnmarshalJSON keeps fields outside the settings editor with their profile.
+func (s *Shell) UnmarshalJSON(data []byte) error {
+	var decoded shellJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return err
+	}
+	for key := range extra {
+		switch strings.ToLower(key) {
+		case "name", "command", "args", "dir":
+			delete(extra, key)
+		}
+	}
+	*s = Shell(decoded)
+	if len(extra) != 0 {
+		s.extra = extra
+	}
+	return nil
+}
+
+func (s Shell) MarshalJSON() ([]byte, error) {
+	data, err := json.Marshal(shellJSON(s))
+	if err != nil || len(s.extra) == 0 {
+		return data, err
+	}
+	fields := maps.Clone(s.extra)
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	return json.Marshal(fields)
 }
 
 // Font controls the terminal cell font.
@@ -279,7 +319,7 @@ func Save(path string, cfg Config) error {
 
 // SaveSettings updates the preferences exposed by the settings panel while
 // preserving the other keys in the existing config file.
-func SaveSettings(path string, cfg Config) error {
+func SaveSettings(path string, cfg Config, shellsChanged bool) error {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Save(path, cfg)
@@ -294,12 +334,18 @@ func SaveSettings(path string, cfg Config) error {
 	if document == nil {
 		document = make(map[string]json.RawMessage)
 	}
+	preferences := map[string]any{
+		"wallpaper": cfg.Wallpaper, "startup_tabs": cfg.Tabs, "single_window": cfg.SingleWindow,
+		"default_shell": cfg.DefaultShell, "scrollback": cfg.Scrollback, "cursor_blink_ms": cfg.CursorBlink,
+	}
+	if shellsChanged {
+		preferences["shells"] = cfg.Shells
+	}
 	for _, update := range []struct {
 		section string
 		values  map[string]any
 	}{
-		{"", map[string]any{"wallpaper": cfg.Wallpaper, "startup_tabs": cfg.Tabs, "single_window": cfg.SingleWindow,
-			"default_shell": cfg.DefaultShell, "scrollback": cfg.Scrollback, "cursor_blink_ms": cfg.CursorBlink}},
+		{"", preferences},
 		{"font", map[string]any{"family": cfg.Font.Family, "size": cfg.Font.Size, "line_height": cfg.Font.LineHeight}},
 		{"interface_font", map[string]any{"family": cfg.InterfaceFont.Family, "size": cfg.InterfaceFont.Size}},
 		{"window", map[string]any{

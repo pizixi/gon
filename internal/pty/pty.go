@@ -21,6 +21,7 @@ type Session struct {
 
 	executable  string
 	startingDir string
+	elevated    bool
 	// alive is false once the shell has exited.
 	alive bool
 	exit  int
@@ -88,6 +89,9 @@ func (s *Session) Executable() string { return s.executable }
 
 // StartingDirectory returns the working directory used to start the program.
 func (s *Session) StartingDirectory() string { return s.startingDir }
+
+// Elevated reports whether the program started with an elevated Windows token.
+func (s *Session) Elevated() bool { return s.elevated }
 
 func isDir(path string) bool {
 	info, err := os.Stat(path)

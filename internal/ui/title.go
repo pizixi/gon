@@ -13,8 +13,11 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/clip"
 
+	"gon/internal/config"
 	"gon/internal/term"
 )
+
+var defaultShellProfiles = config.Default().Shells
 
 type terminalTitle struct {
 	name     string
@@ -25,6 +28,7 @@ type terminalTitle struct {
 type tabLabel struct {
 	name, folder string
 	original     string
+	elevated     bool
 }
 
 func (t *Tab) terminalTitle() terminalTitle {
@@ -53,10 +57,11 @@ func (t *Tab) terminalTitle() terminalTitle {
 func (t *Tab) sidebarLabel(title terminalTitle) tabLabel {
 	label := tabLabel{name: title.name}
 	if pane := t.Focused(); pane != nil && pane.sess != nil {
-		exe := pane.sess.Executable()
-		if strings.EqualFold(filepath.Base(exe), "pwsh.exe") && (!title.native || isExecutableTitle(title.name, exe)) {
-			label.name = fmt.Sprintf("pwsh %d", t.ID)
-			if dir := pane.sess.StartingDirectory(); dir != "" {
+		sess := pane.sess
+		label.elevated = sess.Elevated()
+		if shell := sidebarShellName(sess.Executable(), pane.ShellName(), title); shell != "" {
+			label.name = fmt.Sprintf("%s %d", shell, t.ID)
+			if dir := sess.StartingDirectory(); dir != "" {
 				label.folder = filepath.Base(dir)
 				if label.folder == string(filepath.Separator) {
 					label.folder = filepath.Clean(dir)
@@ -73,14 +78,41 @@ func (t *Tab) sidebarLabel(title terminalTitle) tabLabel {
 	return label
 }
 
+func sidebarShellName(executable, profileName string, title terminalTitle) string {
+	if title.native && !isExecutableTitle(title.name, executable) {
+		return ""
+	}
+	basename := filepath.Base(executable)
+	name := strings.TrimSpace(profileName)
+	for _, shell := range defaultShellProfiles {
+		if strings.EqualFold(basename, shell.Command) {
+			basename = shell.Command
+			if strings.EqualFold(name, shell.Name) {
+				name = ""
+			}
+			break
+		}
+	}
+	if name != "" && !strings.EqualFold(name, basename) {
+		return name
+	}
+	return strings.TrimSuffix(basename, filepath.Ext(basename))
+}
+
 // isExecutableTitle recognizes a default console title by the full launch path.
 func isExecutableTitle(title, executable string) bool {
 	path := strings.TrimSpace(title)
-	for _, prefix := range []string{"Administrator:", "管理员:", "管理员："} {
-		if len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
-			path = strings.TrimSpace(path[len(prefix):])
+	// An elevated console can have both a localized and an English prefix.
+	for {
+		colon := strings.IndexAny(path, ":：")
+		if colon < 0 {
 			break
 		}
+		prefix := strings.TrimSpace(path[:colon])
+		if prefix != "管理员" && !strings.EqualFold(prefix, "Administrator") {
+			break
+		}
+		path = strings.TrimSpace(strings.TrimLeft(path[colon:], ":："))
 	}
 	path = strings.Trim(path, "\"")
 	return filepath.IsAbs(path) && strings.EqualFold(filepath.Clean(path), executable)
@@ -91,6 +123,13 @@ func (l tabLabel) full() string {
 		return l.name
 	}
 	return l.folder + " · " + l.name
+}
+
+func (l tabLabel) accessibleName() string {
+	if l.elevated {
+		return "管理员权限 · " + l.full()
+	}
+	return l.full()
 }
 
 func (a *App) fitTabLabel(label tabLabel, px, width int) string {

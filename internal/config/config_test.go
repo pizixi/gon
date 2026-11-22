@@ -1,10 +1,46 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestSaveSettingsRetainsCustomShellFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gon.json")
+	const data = `{"shells":[{"name":"Bash","command":"bash.exe","args":["-i"],"profile_id":"dev"}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Shells[0].Name = "Dev Bash"
+	cfg.Shells[0].Args = nil
+	if err := SaveSettings(path, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Shells []struct {
+			Name      string   `json:"name"`
+			Args      []string `json:"args"`
+			ProfileID string   `json:"profile_id"`
+		} `json:"shells"`
+	}
+	if err := json.Unmarshal(saved, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Shells) != 1 || document.Shells[0].Name != "Dev Bash" ||
+		document.Shells[0].ProfileID != "dev" || len(document.Shells[0].Args) != 0 {
+		t.Fatalf("saved profiles = %+v", document.Shells)
+	}
+}
 
 func TestDefaultIsValid(t *testing.T) {
 	c := Default()

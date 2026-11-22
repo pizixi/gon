@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"os"
 	"os/exec"
@@ -13,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
+	"golang.org/x/sys/windows"
 
 	"gon/internal/config"
 	"gon/internal/launch"
@@ -46,6 +49,21 @@ func waitText(t *testing.T, p *Pane, want string, d time.Duration) bool {
 	return false
 }
 
+func (h *layoutTest) shellSidebarRow(t *testing.T, label string, alsoInHeader bool) image.Rectangle {
+	t.Helper()
+	index := 0
+	if windows.GetCurrentProcessToken().IsElevated() {
+		label = "管理员权限 · " + label
+	} else if alsoInHeader {
+		index = 1
+	}
+	row := h.controlBounds(t, label, index)
+	if row.Max.X > h.sidePx {
+		t.Fatalf("control %q at %v is outside the sidebar", label, row)
+	}
+	return row
+}
+
 func TestPaneRunsShell(t *testing.T) {
 	if !pty.Available() {
 		t.Skip("ConPTY unavailable")
@@ -71,6 +89,73 @@ func TestPaneRunsShell(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("marker not found; screen=%q", screenText(p))
+}
+
+func TestShellMenuScrollsToLaterProfiles(t *testing.T) {
+	if !pty.Available() {
+		t.Skip("ConPTY unavailable")
+	}
+	cfg := config.Default()
+	cfg.Shells = make([]config.Shell, 24)
+	for i := range cfg.Shells {
+		cfg.Shells[i] = config.Shell{Name: fmt.Sprintf("Shell %d", i+1), Command: "cmd.exe", Args: []string{"/D", "/Q"}}
+	}
+	a := New(cfg, nil, "")
+	defer a.shutdown()
+	a.started = true
+	h := &layoutTest{App: a, size: image.Pt(config.MinWindowWidth, config.MinWindowHeight)}
+	h.frame()
+	h.clickControl(t, "更多操作", 0)
+	row := h.controlBounds(t, "设置", 0)
+	at := row.Min.Add(row.Size().Div(2))
+	h.router.Queue(pointer.Event{
+		Source: pointer.Mouse, Kind: pointer.Scroll,
+		Position: f32.Pt(float32(at.X), float32(at.Y)), Scroll: f32.Pt(0, 2000),
+	})
+	h.frame()
+	last := h.controlBounds(t, "新建 Shell 24", 0)
+	if !last.In(image.Rectangle{Max: h.size}) {
+		t.Fatalf("last Shell menu item was outside the window: %v", last)
+	}
+	h.click(last.Min.Add(last.Size().Div(2)))
+	if pane := a.currentPane(); pane == nil || pane.ShellName() != "Shell 24" {
+		t.Fatal("the last Shell profile could not be started from the menu")
+	}
+}
+
+func TestConfiguredShellSidebarLabel(t *testing.T) {
+	if !pty.Available() {
+		t.Skip("ConPTY unavailable")
+	}
+	dir := t.TempDir()
+	command := filepath.Join(dir, "dev shell.cmd")
+	if err := os.WriteFile(command, []byte("@echo off\r\necho SHELL-READY\r\nset /p GON_TEST_INPUT=\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Shells = []config.Shell{{Name: "Dev Shell", Command: command, Dir: dir}}
+	a := New(cfg, nil, "")
+	defer a.shutdown()
+	h := &layoutTest{App: a, size: image.Pt(900, 601)}
+	h.frame()
+	pane := a.currentPane()
+	if pane == nil || !waitText(t, pane, "SHELL-READY", 5*time.Second) {
+		t.Fatal("the configured shell did not start")
+	}
+
+	label := filepath.Base(dir) + " · Dev Shell 1"
+	pane.applyOutput([]byte("\x1b]2;" + command + "\x07"))
+	h.frame()
+	h.shellSidebarRow(t, label, false)
+
+	const customTitle = "Administrator: Reviewing changes"
+	pane.applyOutput([]byte("\x1b]2;" + customTitle + "\x07"))
+	h.frame()
+	h.shellSidebarRow(t, customTitle, true)
+
+	pane.applyOutput([]byte("\x1b]2;\x07"))
+	h.frame()
+	h.shellSidebarRow(t, label, false)
 }
 
 func TestForwardedTabKeepsCallerEnvironment(t *testing.T) {
@@ -162,23 +247,27 @@ Write-Output "env=$env:GON_TEST_TAB_NAME,dir=$((Get-Item .).Name),only=$env:GON_
 		t.Fatalf("wrong PowerShell titles: %q / %q", first.Title(), second.Title())
 	}
 	h.frame()
-	h.controlBounds(t, "tab-FIRST", 0)
-	h.controlBounds(t, "tab-SECOND", 1)
+	h.shellSidebarRow(t, "tab-FIRST", false)
+	h.shellSidebarRow(t, "tab-SECOND", true)
 
-	firstTitle := "Administrator: " + first.sess.Executable()
+	firstTitle := "管理员:Administrator:" + first.sess.Executable()
 	first.applyOutput([]byte("\x1b]2;" + firstTitle + "\x07"))
 	second.applyOutput([]byte("\x1b]2;" + second.sess.Executable() + "\x07"))
 	h.size = image.Pt(config.MinWindowWidth, config.MinWindowHeight)
 	h.frame()
 	const firstLabel = "FIRST directory · pwsh 1"
-	h.controlBounds(t, firstLabel, 0)
-	h.controlBounds(t, "SECOND directory · pwsh 2", 0)
+	h.shellSidebarRow(t, firstLabel, false)
+	h.shellSidebarRow(t, "SECOND directory · pwsh 2", false)
 	a.moveTab(0, 2)
 	h.frame()
-	row := h.controlBounds(t, firstLabel, 0)
+	row := h.shellSidebarRow(t, firstLabel, false)
 	h.mouse(pointer.Move, row.Min.Add(row.Size().Div(2)), 0)
 
-	wantTooltip := firstLabel + "\n启动目录  " + firstRequest.Dir + "\n原始标题  " + firstTitle
+	wantTooltip := firstLabel
+	if windows.GetCurrentProcessToken().IsElevated() {
+		wantTooltip += "\n管理员权限"
+	}
+	wantTooltip += "\n启动目录  " + firstRequest.Dir + "\n原始标题  " + firstTitle
 	assertTooltipHidden := func() {
 		for _, node := range h.router.AppendSemantics(nil) {
 			if node.Desc.Label == wantTooltip {

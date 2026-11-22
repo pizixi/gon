@@ -201,6 +201,11 @@ func startPTY(command string, args []string, dir string, env []string, cols, row
 	}
 	windows.CloseHandle(pi.Thread)
 	s.executable = exe
+	var token windows.Token
+	if windows.OpenProcessToken(pi.Process, windows.TOKEN_QUERY, &token) == nil {
+		s.elevated = token.IsElevated()
+		token.Close()
+	}
 
 	p := &conPTY{api: api, hpc: hpc, in: cmdIn, out: cmdOut, proc: pi.Process}
 

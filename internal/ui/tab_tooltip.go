@@ -36,6 +36,9 @@ func (a *App) drawTabTooltip(gtx layout.Context, row image.Rectangle, sidebarRig
 
 	full := label.full()
 	details := []string{full}
+	if label.elevated {
+		details = append(details, "管理员权限")
+	}
 	if pane := a.hoverTab.Focused(); pane != nil && pane.sess != nil {
 		if dir := pane.sess.StartingDirectory(); dir != "" {
 			details = append(details, "启动目录  "+dir)

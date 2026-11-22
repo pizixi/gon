@@ -555,6 +555,101 @@ func TestSettingsControlsApplyAndSaveToActiveConfig(t *testing.T) {
 	}
 }
 
+func TestShellSettingsEditAndSaveProfiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gon.json")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(cfg, nil, path)
+	t.Cleanup(a.shutdown)
+	a.started = true
+	h := &layoutTest{App: a, size: image.Pt(config.MinWindowWidth, config.MinWindowHeight)}
+	openEditor := func() {
+		t.Helper()
+		a.openSettings()
+		h.frame()
+		h.clickControl(t, "终端", 0)
+		h.clickControl(t, "Shell 配置", 0)
+	}
+	enter := func(label string, editor *widget.Editor, value string) {
+		t.Helper()
+		h.clickControl(t, label, 0)
+		h.router.Queue(key.Event{Name: "A", Modifiers: key.ModShortcut, State: key.Press})
+		h.frame()
+		start, end := editor.Selection()
+		h.router.Queue(key.EditEvent{Range: key.Range{Start: min(start, end), End: max(start, end)}, Text: value})
+		h.frame()
+	}
+	save := func() config.Config {
+		t.Helper()
+		h.clickControl(t, "保存", 0)
+		if a.settings.open {
+			t.Fatalf("could not save Shell profiles: %s", a.settings.problem)
+		}
+		got, err := config.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	openEditor()
+	h.clickControl(t, "添加 Shell", 0)
+	h.clickControl(t, "保存", 0)
+	if !a.settings.open || a.settings.problem != "请输入 Shell 程序名或路径" || len(a.cfg.Shells) != len(cfg.Shells) {
+		t.Fatal("an empty Shell profile was saved")
+	}
+	profile := a.settings.shells.current()
+	const name = "项目 Shell"
+	const command = `C:\Tools\Git for Windows\bin\bash.exe`
+	const dir = `D:\Work Trees\gon`
+	enter("名称", &profile.name, name)
+	enter("程序", &profile.command, `"`+command+`"`)
+	enter("参数 (JSON)", &profile.args, `["--login", "-i", "one two", "", "line\nnext"]`)
+	enter("启动目录", &profile.dir, dir)
+	h.clickControl(t, "返回终端", 0)
+	h.clickControl(t, "‹", 0)
+	got := save()
+	last := len(cfg.Shells)
+	if len(got.Shells) != last+1 || got.DefaultShell != last || a.cfg.DefaultShell != last {
+		t.Fatalf("saved Shell count = %d, default = %d, live default = %d", len(got.Shells), got.DefaultShell, a.cfg.DefaultShell)
+	}
+	created := got.Shells[last]
+	if created.Name != name || created.Command != command || created.Dir != dir ||
+		!slices.Equal(created.Args, []string{"--login", "-i", "one two", "", "line\nnext"}) {
+		t.Fatalf("saved Shell = %+v", created)
+	}
+	h.frame()
+	h.clickControl(t, "更多操作", 0)
+	h.controlBounds(t, "新建 "+name, 0)
+
+	openEditor()
+	h.clickControl(t, "›", 0)
+	profile = a.settings.shells.current()
+	enter("名称", &profile.name, "Bash")
+	enter("程序", &profile.command, command)
+	enter("参数 (JSON)", &profile.args, "[]")
+	got = save()
+	if first := got.Shells[0]; first.Name != "Bash" || first.Command != command || len(first.Args) != 0 || got.DefaultShell != last {
+		t.Fatalf("edited Shell = %+v, default = %d", first, got.DefaultShell)
+	}
+
+	openEditor()
+	h.clickControl(t, "删除 Shell", 0)
+	h.clickControl(t, "取消", 0)
+	if len(a.cfg.Shells) != last+1 || a.cfg.DefaultShell != last {
+		t.Fatal("cancel applied Shell edits")
+	}
+
+	openEditor()
+	h.clickControl(t, "删除 Shell", 0)
+	got = save()
+	if len(got.Shells) != last || got.DefaultShell != last-1 {
+		t.Fatalf("after deleting the default Shell, count = %d, default = %d", len(got.Shells), got.DefaultShell)
+	}
+}
+
 func TestWindowSettingsEditAndSaveGeometry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gon.json")
 	cfg, err := config.Load(path)

@@ -19,11 +19,50 @@ func TestExecutableTitleUsesFullPath(t *testing.T) {
 		{` Administrator: "c:/program files/powershell/7/PWSH.EXE" `, true},
 		{"管理员: " + exe, true},
 		{"管理员：" + exe, true},
+		{"管理员:Administrator:" + exe, true},
+		{` aDmInIsTrAtOr： 管理员: "c:/program files/powershell/7/PWSH.EXE" `, true},
 		{"Review: " + exe, false},
+		{"管理员:Administrator: Review: " + exe, false},
 		{`Administrator: D:\PowerShell\pwsh.exe`, false},
 	} {
 		if got := isExecutableTitle(tc.title, exe); got != tc.match {
 			t.Errorf("isExecutableTitle(%q) = %t, want %t", tc.title, got, tc.match)
+		}
+	}
+}
+
+func TestSidebarShellName(t *testing.T) {
+	const (
+		pwsh       = `C:\Tools\PowerShell\PWSH.EXE`
+		powershell = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+		cmd        = `C:\Windows\System32\cmd.exe`
+		wsl        = `C:\Windows\System32\wsl.exe`
+		bash       = `C:\Program Files\Git\bin\bash.exe`
+		nu         = `C:\Tools\nu.exe`
+	)
+	for _, tc := range []struct {
+		exe, profile, title, want string
+	}{
+		{pwsh, "PowerShell", "", "pwsh"},
+		{powershell, "Windows PowerShell", "", "powershell"},
+		{powershell, "Windows PowerShell", "管理员: " + powershell, "powershell"},
+		{cmd, "Command Prompt", "", "cmd"},
+		{cmd, "Command Prompt", cmd, "cmd"},
+		{cmd, "Dev Shell", cmd, "Dev Shell"},
+		{wsl, "WSL", wsl, "wsl"},
+		{pwsh, "PowerShell", "管理员:Administrator: Building", ""},
+		{cmd, "Command Prompt", powershell, ""},
+		{wsl, "WSL", "user@host: ~/gon", ""},
+		{bash, "  Git Bash  ", "", "Git Bash"},
+		{bash, "Git Bash", "管理员:Administrator:" + bash, "Git Bash"},
+		{bash, "Git Bash", "MINGW64:/gon", ""},
+		{bash, "Git Bash", `D:\Other\bash.exe`, ""},
+		{nu, "", "", "nu"},
+		{nu, "NU.EXE", nu, "nu"},
+	} {
+		title := terminalTitle{name: tc.title, native: tc.title != ""}
+		if got := sidebarShellName(tc.exe, tc.profile, title); got != tc.want {
+			t.Errorf("sidebarShellName(%q, %q, %q) = %q, want %q", tc.exe, tc.profile, tc.title, got, tc.want)
 		}
 	}
 }

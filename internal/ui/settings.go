@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"math"
 	"path/filepath"
+	"slices"
 
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -34,6 +35,7 @@ const (
 	setInterfaceSize
 	setLineHeight
 	setShell
+	setShellProfile
 	setStartupTabs
 	setScrollback
 	settingsSteppers
@@ -59,6 +61,7 @@ type settingsPanel struct {
 	blur            widget.Float
 	transparency    widget.Float
 	window          windowSettings
+	shells          shellSettings
 	cursorBlink     widget.Clickable
 	singleWindow    widget.Clickable
 	blinkInterval   int
@@ -83,6 +86,7 @@ func (a *App) openSettings() {
 	s.problem = ""
 	s.fonts = fontSettings{}
 	s.window.reset(s.draft.Window)
+	s.shells.reset(s.draft.Shells, s.draft.DefaultShell)
 	a.menuOpen = false
 	a.hoverTab = nil
 	if a.searchOpen {
@@ -120,6 +124,9 @@ func (a *App) drawSettings(gtx layout.Context, size image.Point) {
 		return
 	}
 
+	if s.page == settingsTerminal {
+		s.updateShellSettings(gtx)
+	}
 	for i := range s.tabs {
 		if s.tabs[i].Clicked(gtx) {
 			s.page = i
@@ -160,6 +167,10 @@ func (a *App) drawSettings(gtx layout.Context, size image.Point) {
 	if s.save.Clicked(gtx) && s.picker == nil && s.fonts.download == nil {
 		if err := s.window.apply(&s.draft.Window); err != nil {
 			s.page = settingsWindow
+			s.problem = err.Error()
+		} else if err := s.shells.apply(&s.draft); err != nil {
+			s.page = settingsTerminal
+			s.shells.open = true
 			s.problem = err.Error()
 		} else if err := a.saveSettings(); err != nil {
 			s.problem = err.Error()
@@ -202,6 +213,15 @@ func (a *App) drawSettings(gtx layout.Context, size image.Point) {
 		button := image.Rect(nav.Min.X, y, nav.Max.X, y+gtx.Dp(30))
 		a.drawSettingsButton(gtx, button, &s.fonts.directory, "字体目录", a.theme.PanelHi)
 	}
+	if s.page == settingsTerminal {
+		y := r.Max.Y - gtx.Dp(43)
+		button := image.Rect(nav.Min.X, y, nav.Max.X, y+gtx.Dp(30))
+		label := "Shell 配置"
+		if s.shells.open {
+			label = "返回终端"
+		}
+		a.drawSettingsButton(gtx, button, &s.shells.toggle, label, a.theme.PanelHi)
+	}
 
 	rowH := gtx.Dp(43)
 	row := func(i int) image.Rectangle {
@@ -231,9 +251,13 @@ func (a *App) drawSettings(gtx layout.Context, size image.Point) {
 		a.drawSettingStepper(gtx, row(3), setInterfaceSize, "界面字号", fmt.Sprintf("%g dp", s.draft.InterfaceFont.Size))
 		a.drawSettingStepper(gtx, row(4), setLineHeight, "终端行距", fmt.Sprintf("%.2f", s.draft.Font.LineHeight))
 	case settingsTerminal:
+		if s.shells.open {
+			a.drawShellSettings(gtx, row)
+			break
+		}
 		shellName := "—"
-		if i := s.draft.DefaultShell; i >= 0 && i < len(s.draft.Shells) {
-			shellName = s.draft.Shells[i].Name
+		if i := s.draft.DefaultShell; i >= 0 && i < len(s.shells.profiles) {
+			shellName = s.shells.profiles[i].displayName()
 		}
 		a.drawSettingStepper(gtx, row(0), setShell, "默认 Shell", shellName)
 		a.drawSettingStepper(gtx, row(1), setStartupTabs, "启动标签数", fmt.Sprint(s.draft.Tabs))
@@ -247,6 +271,9 @@ func (a *App) drawSettings(gtx layout.Context, size image.Point) {
 		a.drawText(gtx, a.textFit(s.problem, px, right-left), left, r.Max.Y-gtx.Dp(45), px, 0xff817a, 0xff)
 	}
 	y := r.Max.Y - gtx.Dp(43)
+	if s.page == settingsTerminal && s.shells.open {
+		a.drawShellActions(gtx, image.Pt(left, y))
+	}
 	confirm := image.Rect(right-gtx.Dp(72), y, right, y+gtx.Dp(30))
 	back := confirm.Sub(image.Pt(gtx.Dp(82), 0))
 	a.drawSettingsButton(gtx, back, &s.cancel, "取消", a.theme.PanelHi)
@@ -342,7 +369,7 @@ func (a *App) drawSettingStepper(gtx layout.Context, r image.Rectangle, id int, 
 	prev := image.Rect(x, y, x+w, y+h)
 	next := image.Rect(r.Max.X-w, y, r.Max.X, y+h)
 	prevLabel, nextLabel := "−", "+"
-	if id == setShell {
+	if id == setShell || id == setShellProfile {
 		prevLabel, nextLabel = "‹", "›"
 	}
 	a.drawSettingsButton(gtx, prev, &a.settings.adjust[id][0], prevLabel, a.theme.PanelHi)
@@ -386,8 +413,13 @@ func (s *settingsPanel) change(id, step int) {
 	case setLineHeight:
 		s.draft.Font.LineHeight = clampF(math.Round(s.draft.Font.LineHeight*100+float64(step*5))/100, 0.8, 2)
 	case setShell:
-		if n := len(s.draft.Shells); n != 0 {
+		if n := len(s.shells.profiles); n != 0 {
 			s.draft.DefaultShell = (s.draft.DefaultShell + n + step) % n
+		}
+	case setShellProfile:
+		if n := len(s.shells.profiles); n != 0 {
+			s.shells.selected = (s.shells.selected + n + step) % n
+			s.problem = ""
 		}
 	case setStartupTabs:
 		s.draft.Tabs = min(9, max(1, s.draft.Tabs+step))
@@ -428,11 +460,14 @@ func (s *settingsPanel) receivePicker() {
 
 func (a *App) saveSettings() error {
 	cfg := a.settings.draft
+	shellsChanged := !slices.EqualFunc(cfg.Shells, a.cfg.Shells, func(left, right config.Shell) bool {
+		return left.Name == right.Name && left.Command == right.Command && left.Dir == right.Dir && slices.Equal(left.Args, right.Args)
+	})
 	if cfg.Font.Family == a.cfg.Font.Family && cfg.Font.Size == a.cfg.Font.Size &&
 		cfg.Font.LineHeight == a.cfg.Font.LineHeight && cfg.Scrollback == a.cfg.Scrollback &&
 		cfg.CursorBlink == a.cfg.CursorBlink &&
 		cfg.InterfaceFont == a.cfg.InterfaceFont && cfg.Wallpaper == a.cfg.Wallpaper &&
-		cfg.Window == a.cfg.Window && cfg.Tabs == a.cfg.Tabs && cfg.DefaultShell == a.cfg.DefaultShell &&
+		cfg.Window == a.cfg.Window && cfg.Tabs == a.cfg.Tabs && cfg.DefaultShell == a.cfg.DefaultShell && !shellsChanged &&
 		cfg.SingleWindow == a.cfg.SingleWindow && !a.settings.fonts.reload[terminalFont] && !a.settings.fonts.reload[interfaceFont] {
 		return nil
 	}
@@ -468,7 +503,7 @@ func (a *App) saveSettings() error {
 			return fmt.Errorf("无法读取壁纸　%w", err)
 		}
 	}
-	if err := config.SaveSettings(a.configPath, cfg); err != nil {
+	if err := config.SaveSettings(a.configPath, cfg, shellsChanged); err != nil {
 		return fmt.Errorf("保存失败　%w", err)
 	}
 	if base != a.view.Family {

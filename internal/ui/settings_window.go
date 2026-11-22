@@ -109,6 +109,14 @@ func (a *App) drawWindowNumberPair(gtx layout.Context, row image.Rectangle, labe
 }
 
 func (a *App) drawWindowNumber(gtx layout.Context, r image.Rectangle, label string, editor *widget.Editor, enabled bool) {
+	s := &a.settings.window
+	if enabled && s.shaper == nil {
+		s.shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(gofont.Regular()))
+	}
+	a.drawSettingEditor(gtx, r, label, "", editor, s.shaper, enabled)
+}
+
+func (a *App) drawSettingEditor(gtx layout.Context, r image.Rectangle, label, hint string, editor *widget.Editor, shaper *text.Shaper, enabled bool) {
 	if r.Empty() {
 		return
 	}
@@ -131,9 +139,9 @@ func (a *App) drawWindowNumber(gtx layout.Context, r image.Rectangle, label stri
 		a.drawText(gtx, value, content.Min.X, (r.Min.Y+r.Max.Y+a.textAscent(px))/2, px, fg, 0xff)
 		return
 	}
-	s := &a.settings.window
-	if s.shaper == nil {
-		s.shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(gofont.Regular()))
+	if hint != "" && editor.Len() == 0 {
+		baseline := (r.Min.Y + r.Max.Y + a.textAscent(px)) / 2
+		a.drawText(gtx, a.textFit(hint, px, content.Dx()), content.Min.X, baseline, px, a.theme.Dim, 0xff)
 	}
 
 	textColor := op.Record(gtx.Ops)
@@ -147,7 +155,7 @@ func (a *App) drawWindowNumber(gtx layout.Context, r image.Rectangle, label stri
 	semantic.LabelOp(label).Add(gtx.Ops)
 	gtx.Constraints = layout.Constraints{Min: image.Pt(content.Dx(), 0), Max: content.Size()}
 	macro := op.Record(gtx.Ops)
-	dims := editor.Layout(gtx, s.shaper, font.Font{}, gtx.Metric.PxToSp(px), ink, selection)
+	dims := editor.Layout(gtx, shaper, font.Font{}, gtx.Metric.PxToSp(px), ink, selection)
 	call := macro.Stop()
 	baseline := (r.Dy() + a.textAscent(px)) / 2
 	y := max(0, min(r.Dy()-dims.Size.Y, baseline-(dims.Size.Y-dims.Baseline)))

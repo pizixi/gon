@@ -109,6 +109,7 @@ type App struct {
 	searchMiss  bool
 	hoverMenu   bool
 	menuOpen    bool
+	menuScroll  int
 	settings    settingsPanel
 
 	lastSize        image.Point
@@ -861,7 +862,10 @@ func (a *App) drawSidebarToolbar(gtx layout.Context, area image.Rectangle, rowH 
 	}{
 		{"向右分屏", func() { a.SplitActive(SplitRight) }},
 		{"向下分屏", func() { a.SplitActive(SplitDown) }},
-		{"更多操作", func() { a.menuOpen = !a.menuOpen }},
+		{"更多操作", func() {
+			a.menuOpen = !a.menuOpen
+			a.menuScroll = 0
+		}},
 	}
 	for i, action := range actions {
 		r := image.Rect(inner.Min.X+i*inner.Dx()/len(actions), inner.Min.Y,
@@ -987,7 +991,7 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 	items := []item{{"设置", a.openSettings}}
 	for i, sh := range a.cfg.Shells {
 		idx := i
-		name := sh.Name
+		name := shellDisplayName(sh.Name, sh.Command)
 		items = append(items, item{
 			label: "新建 " + name,
 			run: func() {
@@ -1006,20 +1010,35 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 	)
 
 	px := a.uiPx(gtx, 12)
-	w := gtx.Dp(unit.Dp(210))
-	rowH := gtx.Dp(unit.Dp(30))
 	x := sidebar.Min.X + a.pad
-	height := len(items)*rowH + gtx.Dp(unit.Dp(10))
-	y := size.Y - height - a.pad - gtx.Dp(unit.Dp(52))
-	if y < a.hdrH {
-		y = a.hdrH
+	w, rowH, inset := min(gtx.Dp(210), size.X-x), gtx.Dp(30), gtx.Dp(5)
+	bottom := size.Y - a.pad - gtx.Dp(52)
+	height := min(len(items)*rowH+2*inset, bottom-a.hdrH)
+	if w <= 2*inset || height <= 2*inset {
+		return
 	}
-	r := image.Rect(x, y, x+w, y+height)
+	r := image.Rect(x, bottom-height, x+w, bottom)
+	list := sidebarList{area: r.Inset(inset), rowHeight: rowH}
+	filter := pointer.Filter{Target: menuScrollTag{}, Kinds: pointer.Scroll, ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20}}
+	for {
+		e, ok := gtx.Event(filter)
+		if !ok {
+			break
+		}
+		a.menuScroll += int(e.(pointer.Event).Scroll.Y)
+	}
+	a.menuScroll = list.clampScroll(a.menuScroll, len(items))
 	paint.FillShape(gtx.Ops, NRGBA(0x151b23, perfAlpha(0.96)), clip.UniformRRect(r, gtx.Dp(unit.Dp(8))).Op(gtx.Ops))
 	paint.FillShape(gtx.Ops, NRGBA(a.theme.Border, 0x90), clip.Stroke{Path: clip.UniformRRect(r, gtx.Dp(unit.Dp(8))).Path(gtx.Ops), Width: 1}.Op())
 
-	for i, it := range items {
-		ir := image.Rect(r.Min.X+4, r.Min.Y+4+i*rowH, r.Max.X-4, r.Min.Y+4+(i+1)*rowH)
+	defer clip.Rect(list.area).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, menuScrollTag{})
+	for i := a.menuScroll / rowH; i < len(items); i++ {
+		ir := list.row(i, a.menuScroll)
+		if ir.Min.Y >= list.area.Max.Y {
+			break
+		}
+		it := items[i]
 		tag := menuItemTag{idx: i}
 		func() {
 			defer clip.Rect(ir).Push(gtx.Ops).Pop()
@@ -1049,7 +1068,8 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 		if hover {
 			paint.FillShape(gtx.Ops, NRGBA(lighten(a.theme.Panel, 0.12), 0xff), clip.UniformRRect(ir, gtx.Dp(unit.Dp(5))).Op(gtx.Ops))
 		}
-		a.drawText(gtx, it.label, ir.Min.X+gtx.Dp(unit.Dp(10)), ir.Min.Y+(ir.Dy()+a.textAscent(px))/2, px, a.theme.Fg, 0xff)
+		pad := gtx.Dp(10)
+		a.drawText(gtx, a.textFit(it.label, px, ir.Dx()-2*pad), ir.Min.X+pad, ir.Min.Y+(ir.Dy()+a.textAscent(px))/2, px, a.theme.Fg, 0xff)
 		if clicked {
 			a.menuOpen = false
 			it.run()
@@ -1068,6 +1088,7 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 	}
 }
 
+type menuScrollTag struct{}
 type menuItemTag struct{ idx int }
 
 func (menuItemTag) ImplementsEventTag() {}
