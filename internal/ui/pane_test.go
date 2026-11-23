@@ -125,7 +125,10 @@ func TestConfiguredShellSidebarLabel(t *testing.T) {
 	if !pty.Available() {
 		t.Skip("ConPTY unavailable")
 	}
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "tools")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	command := filepath.Join(dir, "dev shell.cmd")
 	if err := os.WriteFile(command, []byte("@echo off\r\necho SHELL-READY\r\nset /p GON_TEST_INPUT=\r\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -142,9 +145,11 @@ func TestConfiguredShellSidebarLabel(t *testing.T) {
 	}
 
 	label := filepath.Base(dir) + " · Dev Shell"
-	pane.applyOutput([]byte("\x1b]2;" + command + "\x07"))
-	h.frame()
-	h.shellSidebarRow(t, label, false)
+	for _, title := range []string{command, "tools", dir, filepath.Base(command)} {
+		pane.applyOutput([]byte("\x1b]2;" + title + "\x07"))
+		h.frame()
+		h.shellSidebarRow(t, label, false)
+	}
 
 	const customTitle = "Administrator: Reviewing changes"
 	pane.applyOutput([]byte("\x1b]2;" + customTitle + "\x07"))

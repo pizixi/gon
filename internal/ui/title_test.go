@@ -25,13 +25,14 @@ func TestExecutableTitleUsesFullPath(t *testing.T) {
 		{"管理员:Administrator: Review: " + exe, false},
 		{`Administrator: D:\PowerShell\pwsh.exe`, false},
 	} {
-		if got := isExecutableTitle(tc.title, exe); got != tc.match {
-			t.Errorf("isExecutableTitle(%q) = %t, want %t", tc.title, got, tc.match)
+		label := sessionTabLabel(terminalTitle{name: tc.title, native: true}, exe, "PowerShell", "")
+		if got := label.original != ""; got != tc.match {
+			t.Errorf("title %q matched the executable path = %t, want %t", tc.title, got, tc.match)
 		}
 	}
 }
 
-func TestSidebarShellName(t *testing.T) {
+func TestSessionTabLabelUsesProgramName(t *testing.T) {
 	const (
 		pwsh       = `C:\Tools\PowerShell\PWSH.EXE`
 		powershell = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
@@ -61,8 +62,39 @@ func TestSidebarShellName(t *testing.T) {
 		{nu, "NU.EXE", nu, "nu"},
 	} {
 		title := terminalTitle{name: tc.title, native: tc.title != ""}
-		if got := sidebarShellName(tc.exe, tc.profile, title); got != tc.want {
-			t.Errorf("sidebarShellName(%q, %q, %q) = %q, want %q", tc.exe, tc.profile, tc.title, got, tc.want)
+		want := tc.want
+		if want == "" {
+			want = tc.title
+		}
+		if label := sessionTabLabel(title, tc.exe, tc.profile, ""); label.name != want {
+			t.Errorf("sessionTabLabel(%q, %q, %q) = %q, want %q", tc.title, tc.exe, tc.profile, label.name, want)
+		}
+	}
+}
+
+func TestSessionTabLabelUsesLaunchDirectory(t *testing.T) {
+	const (
+		exe   = `C:\tools\hulkbox\bin\codex.exe`
+		dir   = `C:\tools`
+		short = "tools · codex"
+	)
+	for _, tc := range []struct {
+		title, want string
+	}{
+		{"", short},
+		{"tools", short},
+		{`管理员: Administrator: "TOOLS"`, short},
+		{`"c:/tools/."`, short},
+		{"codex", short},
+		{"CODEX.EXE", short},
+		{`D:\Other\tools`, `D:\Other\tools`},
+		{"◐  tools", "◐  tools"},
+		{"tools / Review changes", "tools / Review changes"},
+		{"other-project", "other-project"},
+	} {
+		title := terminalTitle{name: tc.title, native: tc.title != ""}
+		if label := sessionTabLabel(title, exe, "codex.exe", dir); label.full() != tc.want || label.original != "" {
+			t.Errorf("title %q produced %+v, want %q with program details", tc.title, label, tc.want)
 		}
 	}
 }

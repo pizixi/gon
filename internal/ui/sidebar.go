@@ -271,11 +271,10 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	}
 	if gtx.Enabled() {
 		cursor := pointer.CursorPointer
-		if len(a.tabs) > 1 {
-			cursor = pointer.CursorGrab
-		}
 		if dragged {
 			cursor = pointer.CursorGrabbing
+		} else if a.tabDrag.tab == tab && len(a.tabs) > 1 {
+			cursor = pointer.CursorGrab
 		}
 		cursor.Add(gtx.Ops)
 		semantic.LabelOp(label.full()).Add(gtx.Ops)
@@ -305,6 +304,8 @@ func (a *App) drawTabDrag(gtx layout.Context, list sidebarList, px int) {
 	if !drag.moving || !drag.at.In(list.area) {
 		return
 	}
+	defer clip.Rect(list.area).Push(gtx.Ops).Pop()
+	pointer.CursorGrabbing.Add(gtx.Ops)
 	top := max(list.area.Min.Y, min(list.area.Max.Y-list.rowHeight, drag.at.Y-drag.offset))
 	card := image.Rect(list.area.Min.X+gtx.Dp(5), top, list.area.Max.X-gtx.Dp(4), top+list.rowHeight)
 	shape := clip.UniformRRect(card, gtx.Dp(7))

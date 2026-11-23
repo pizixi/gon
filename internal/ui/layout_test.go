@@ -232,12 +232,25 @@ func TestTabDragReordersWithoutChangingTheActiveShell(t *testing.T) {
 	r := h.controlBounds(t, "First", 0)
 	from := r.Min.Add(r.Size().Div(2))
 	to := image.Pt(from.X, h.controlBounds(t, "Third", 0).Max.Y-2)
+	wantCursor := func(stage string, want pointer.Cursor) {
+		t.Helper()
+		if got := h.router.Cursor(); got != want {
+			t.Fatalf("%s cursor = %v, want %v", stage, got, want)
+		}
+	}
+	h.mouse(pointer.Move, from, 0)
+	wantCursor("hover", pointer.CursorPointer)
 	h.mouse(pointer.Press, from, pointer.ButtonPrimary)
+	wantCursor("pressed", pointer.CursorGrab)
+	h.frame()
+	wantCursor("held without moving", pointer.CursorGrab)
 	h.mouse(pointer.Move, to, pointer.ButtonPrimary)
+	wantCursor("dragged over another row", pointer.CursorGrabbing)
 	if a.tabDrag.tab != first || !a.tabDrag.moving || a.tabDrag.at != to || a.tabs[0] != first {
 		t.Fatalf("tab drag did not preview the insert: %+v", a.tabDrag)
 	}
 	h.mouse(pointer.Release, to, 0)
+	wantCursor("released", pointer.CursorPointer)
 	if !slices.Equal(a.tabs, []*Tab{second, third, first}) || a.activeTab() != second || a.tabDrag.tab != nil {
 		t.Fatal("dropping a tab changed the active shell or produced the wrong order")
 	}

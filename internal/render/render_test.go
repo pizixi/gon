@@ -31,8 +31,9 @@ func testView(t *testing.T) *View {
 func TestPowerlineGlyphsRecordOps(t *testing.T) {
 	var ops op.Ops
 	gtx := layout.Context{Ops: &ops}
-	viewport := clip.Rect(image.Rect(0, 0, 48, 20)).Push(&ops)
-	for col, glyph := range []rune{'\ue0b0', '\ue0b1', '\ue0b2', '\ue0b3'} {
+	viewport := clip.Rect(image.Rect(0, 0, 96, 20)).Push(&ops)
+	for glyph := '\ue0b0'; glyph <= '\ue0b7'; glyph++ {
+		col := int(glyph - '\ue0b0')
 		cell := image.Rect(col*12, 0, (col+1)*12, 20)
 		if !drawGridGlyph(gtx, glyph, cell, 0xffffff) {
 			t.Fatalf("glyph %U was not drawn", glyph)

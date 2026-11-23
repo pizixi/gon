@@ -5,6 +5,7 @@ import (
 	"image"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,18 +63,7 @@ func (t *Tab) sidebarLabel(title terminalTitle) tabLabel {
 	label := tabLabel{name: title.name}
 	if pane := t.Focused(); pane != nil && pane.sess != nil {
 		sess := pane.sess
-		if shell := sidebarShellName(sess.Executable(), pane.ShellName(), title); shell != "" {
-			label.name = shell
-			if dir := sess.StartingDirectory(); dir != "" {
-				label.folder = filepath.Base(dir)
-				if label.folder == string(filepath.Separator) {
-					label.folder = filepath.Clean(dir)
-				}
-			}
-			if title.native {
-				label.original = title.name
-			}
-		}
+		label = sessionTabLabel(title, sess.Executable(), pane.ShellName(), sess.StartingDirectory())
 	}
 	if len(t.Panes) > 1 {
 		label.name = fmt.Sprintf("%s (%d)", label.name, len(t.Panes))
@@ -81,10 +71,41 @@ func (t *Tab) sidebarLabel(title terminalTitle) tabLabel {
 	return label
 }
 
-func sidebarShellName(executable, profileName string, title terminalTitle) string {
-	if title.native && !isExecutableTitle(title.name, executable) {
-		return ""
+func sessionTabLabel(title terminalTitle, executable, profileName, directory string) tabLabel {
+	folder := ""
+	if directory != "" {
+		directory = filepath.Clean(directory)
+		folder = filepath.Base(directory)
+		if folder == string(filepath.Separator) {
+			folder = directory
+		}
 	}
+	label := tabLabel{name: title.name}
+	if title.native {
+		name := consoleTitleText(title.name)
+		if filepath.IsAbs(name) {
+			path := filepath.Clean(name)
+			if strings.EqualFold(path, filepath.Clean(executable)) {
+				label.original = title.name
+			} else if directory == "" || !strings.EqualFold(path, directory) {
+				return label
+			}
+		} else {
+			base := filepath.Base(executable)
+			names := []string{folder, base, strings.TrimSuffix(base, filepath.Ext(base)), strings.TrimSpace(profileName)}
+			if name == "" || !slices.ContainsFunc(names, func(candidate string) bool {
+				return strings.EqualFold(candidate, name)
+			}) {
+				return label
+			}
+		}
+	}
+	label.name = sidebarProgramName(executable, profileName)
+	label.folder = folder
+	return label
+}
+
+func sidebarProgramName(executable, profileName string) string {
 	basename := filepath.Base(executable)
 	name := strings.TrimSpace(profileName)
 	for _, shell := range defaultShellProfiles {
@@ -102,8 +123,8 @@ func sidebarShellName(executable, profileName string, title terminalTitle) strin
 	return strings.TrimSuffix(basename, filepath.Ext(basename))
 }
 
-// isExecutableTitle recognizes a default console title by the full launch path.
-func isExecutableTitle(title, executable string) bool {
+// consoleTitleText strips elevation prefixes before labeling a session.
+func consoleTitleText(title string) string {
 	path := strings.TrimSpace(title)
 	// An elevated console can have both a localized and an English prefix.
 	for {
@@ -117,8 +138,7 @@ func isExecutableTitle(title, executable string) bool {
 		}
 		path = strings.TrimSpace(strings.TrimLeft(path[colon:], ":："))
 	}
-	path = strings.Trim(path, "\"")
-	return filepath.IsAbs(path) && strings.EqualFold(filepath.Clean(path), executable)
+	return strings.TrimSpace(strings.Trim(path, "\""))
 }
 
 func (l tabLabel) full() string {

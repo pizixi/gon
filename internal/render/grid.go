@@ -47,7 +47,7 @@ var doubleBoxEdges = map[rune]uint8{
 
 // drawGridGlyph fits rules and blocks to cell edges, regardless of line height.
 func drawGridGlyph(gtx layout.Context, r rune, cell image.Rectangle, color uint32) bool {
-	if r >= '\ue0b0' && r <= '\ue0b3' {
+	if r >= '\ue0b0' && r <= '\ue0b7' {
 		drawPowerline(gtx, r, cell, color)
 		return true
 	}
@@ -185,20 +185,32 @@ func drawGridGlyph(gtx layout.Context, r rune, cell image.Rectangle, color uint3
 }
 
 func drawPowerline(gtx layout.Context, r rune, cell image.Rectangle, color uint32) {
-	left, right := float32(cell.Min.X), float32(cell.Max.X)
+	flatX, tipX := float32(cell.Min.X), float32(cell.Max.X)
 	top, bottom := float32(cell.Min.Y), float32(cell.Max.Y)
-	if r >= '\ue0b2' {
-		left, right = right, left
+	middle := (top + bottom) / 2
+	switch r {
+	case '\ue0b2', '\ue0b3', '\ue0b6', '\ue0b7':
+		flatX, tipX = tipX, flatX
 	}
 	var path clip.Path
 	path.Begin(gtx.Ops)
-	path.MoveTo(f32.Pt(left, top))
-	path.LineTo(f32.Pt(right, (top+bottom)/2))
-	path.LineTo(f32.Pt(left, bottom))
-	if r == '\ue0b0' || r == '\ue0b2' {
+	path.MoveTo(f32.Pt(flatX, top))
+	if r >= '\ue0b4' {
+		// Two quarter ellipses meet the adjoining background at the cell edge.
+		const control = 0.55228475
+		controlX := flatX + (tipX-flatX)*control
+		controlY := (middle - top) * control
+		path.CubeTo(f32.Pt(controlX, top), f32.Pt(tipX, middle-controlY), f32.Pt(tipX, middle))
+		path.CubeTo(f32.Pt(tipX, middle+controlY), f32.Pt(controlX, bottom), f32.Pt(flatX, bottom))
+	} else {
+		path.LineTo(f32.Pt(tipX, middle))
+		path.LineTo(f32.Pt(flatX, bottom))
+	}
+	switch r {
+	case '\ue0b0', '\ue0b2', '\ue0b4', '\ue0b6':
 		path.Close()
 		paint.FillShape(gtx.Ops, rgb(color), clip.Outline{Path: path.End()}.Op())
-	} else {
+	default:
 		// Finish recording the path before writing the cell clip to Gio's ops.
 		stroke := clip.Stroke{Path: path.End(), Width: 1}
 		bounds := clip.Rect(cell).Push(gtx.Ops)

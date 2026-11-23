@@ -104,6 +104,38 @@ func TestTerminalGridGlyphsMeetAtCellEdges(t *testing.T) {
 	}
 }
 
+func TestRoundedPowerlineSeparatorsMeetSegmentBackground(t *testing.T) {
+	v := testView(t)
+	defer v.Family.Close()
+	v.ShowCursor = false
+	for _, size := range []int{15, 23} {
+		v.SetFontSize(size)
+		m := v.Metrics()
+		scr := term.NewScreen(6, 1, 0)
+		term.NewParser(scr).Write([]byte("\x1b[38;2;152;87;164m \ue0b6\x1b[48;2;152;87;164m  \x1b[49m\ue0b4 "))
+		w, h := 6*m.CellW, m.CellH
+		img := drawHeadless(t, w, h, func(gtx layout.Context) {
+			v.DrawRect(gtx, scr, w, h, 0, Selection{}, 0)
+		})
+
+		segment := toRGBA(rgb(0x9857a4))
+		for _, x := range []int{2*m.CellW - 1, 2 * m.CellW, 4*m.CellW - 1, 4 * m.CellW} {
+			for y := 1; y < h-1; y++ {
+				if got := img.RGBAAt(x, y); got != segment {
+					t.Fatalf("at font size %d, join pixel (%d, %d) = %v, want %v", size, x, y, got, segment)
+				}
+			}
+		}
+		bg := toRGBA(rgb(v.Pal.Bg))
+		if left := img.RGBAAt(m.CellW, 0); left != bg {
+			t.Errorf("left cap corner at size %d = %v, want %v", size, left, bg)
+		}
+		if right := img.RGBAAt(5*m.CellW-1, h-1); right != bg {
+			t.Errorf("right cap corner at size %d = %v, want %v", size, right, bg)
+		}
+	}
+}
+
 func TestDrawRectScrollback(t *testing.T) {
 	v := testView(t)
 	scr := term.NewScreen(20, 3, 100)
