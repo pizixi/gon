@@ -49,11 +49,12 @@ func TestPaneForwardsTrackedMouseInSplit(t *testing.T) {
 	parser := term.NewParser(p.scr)
 	parser.Write([]byte("\x1b[?1003;1006h"))
 	metrics := a.view.Metrics()
-	area := image.Rect(240, 60, 240+24*metrics.CellW, 60+10*metrics.CellH)
+	body := image.Rect(240, 60, 240+24*metrics.CellW+2*a.paneInsetPx, 60+10*metrics.CellH)
+	area := a.terminalArea(body)
 	frame := func() {
 		ops.Reset()
 		gtx := layout.Context{Ops: &ops, Source: router.Source(), Metric: unit.Metric{PxPerDp: 1, PxPerSp: 1}}
-		a.paneInput(gtx, p, area, true)
+		a.paneInput(gtx, p, body, true)
 		router.Frame(&ops)
 	}
 	position := func(col, row int) f32.Point {

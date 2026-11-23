@@ -56,17 +56,17 @@ type App struct {
 	hdrH int
 	pad  int
 
-	paneHeaderH     int
-	paneScrollWidth int
-	minPaneSize     image.Point
-	dragPane        *Pane
-	dropPane        *Pane
-	dragStart       image.Point
-	dragPoint       image.Point
-	paneDragging    bool
-	dragID          pointer.ID
-	resizeTile      *paneTile
-	resizeOffset    int
+	paneHeaderH  int
+	paneInsetPx  int
+	minPaneSize  image.Point
+	dragPane     *Pane
+	dropPane     *Pane
+	dragStart    image.Point
+	dragPoint    image.Point
+	paneDragging bool
+	dragID       pointer.ID
+	resizeTile   *paneTile
+	resizeOffset int
 
 	selecting       *Pane
 	selectionCursor func() (image.Point, bool)
@@ -143,18 +143,18 @@ func New(cfg config.Config, win *app.Window, configPath string) *App {
 		configPath = config.Path()
 	}
 	a := &App{
-		cfg:             cfg,
-		configPath:      configPath,
-		fontDirectory:   filepath.Join(filepath.Dir(configPath), "fonts"),
-		wallpaperPath:   expandPath(cfg.Wallpaper),
-		win:             win,
-		hdrH:            titleBarHeight,
-		pad:             cfg.Window.Padding,
-		paneHeaderH:     paneHeaderHeight,
-		paneScrollWidth: 11,
-		minPaneSize:     image.Pt(minPaneWidth, minPaneHeight),
-		fontBase:        int(cfg.Font.Size + 0.5),
-		launches:        make(chan pendingLaunch, 16),
+		cfg:           cfg,
+		configPath:    configPath,
+		fontDirectory: filepath.Join(filepath.Dir(configPath), "fonts"),
+		wallpaperPath: expandPath(cfg.Wallpaper),
+		win:           win,
+		hdrH:          titleBarHeight,
+		pad:           cfg.Window.Padding,
+		paneHeaderH:   paneHeaderHeight,
+		paneInsetPx:   paneHorizontalInset,
+		minPaneSize:   image.Pt(minPaneWidth, minPaneHeight),
+		fontBase:      int(cfg.Font.Size + 0.5),
+		launches:      make(chan pendingLaunch, 16),
 	}
 	a.selectionCursor = func() (image.Point, bool) {
 		return windowDragCursor(a.hwnd.Load())
@@ -601,7 +601,7 @@ func (a *App) layout(gtx layout.Context) {
 	a.sidePx = gtx.Dp(unit.Dp(float32(a.cfg.Window.Sidebar)))
 	a.hdrH = gtx.Dp(titleBarHeight)
 	a.paneHeaderH = gtx.Dp(paneHeaderHeight)
-	a.paneScrollWidth = gtx.Dp(11)
+	a.paneInsetPx = gtx.Dp(paneHorizontalInset)
 	a.minPaneSize = image.Pt(gtx.Dp(minPaneWidth), gtx.Dp(minPaneHeight))
 	if p := a.currentPane(); p != nil && p.outputChanged.Swap(false) {
 		a.view.ResetCursorBlink()
@@ -965,7 +965,8 @@ func (a *App) drawToast(gtx layout.Context, size image.Point) {
 	r := image.Rect(x, y, x+w, y+h)
 	paint.FillShape(gtx.Ops, NRGBA(0x1b2029, perfAlpha(0.95)), clip.UniformRRect(r, gtx.Dp(unit.Dp(8))).Op(gtx.Ops))
 	tw := a.textMeasure(a.toast, px)
-	a.drawText(gtx, a.toast, r.Min.X+(r.Dx()-tw)/2, r.Min.Y+(r.Dy()+a.textAscent(px))/2, px, a.theme.Fg, 0xff)
+	fg := condColor(a.toast == copiedToastText, 0xa6e3a1, a.theme.Fg)
+	a.drawText(gtx, a.toast, r.Min.X+(r.Dx()-tw)/2, r.Min.Y+(r.Dy()+a.textAscent(px))/2, px, fg, 0xff)
 	gtx.Execute(op.InvalidateCmd{At: a.toastUntil})
 }
 
@@ -1097,21 +1098,25 @@ func (menuCloseTag) ImplementsEventTag() {}
 // ---------------------------------------------------------------------------
 // clipboard
 
+const copiedToastText = "已复制"
+
 func (a *App) copySelection() {
 	a.copyPaneSelection(a.currentPane())
 }
 
-func (a *App) copyPaneSelection(p *Pane) {
+func (a *App) copyPaneSelection(p *Pane) bool {
 	if p == nil {
-		return
+		return false
 	}
-	if txt := p.SelectedText(); txt != "" {
-		a.clipboard = txt
-		a.clipWrite = true
-		a.notify("已复制")
-	} else {
+	txt := p.SelectedText()
+	if txt == "" {
 		a.notify("没有选中文本")
+		return false
 	}
+	a.clipboard = txt
+	a.clipWrite = true
+	a.notify(copiedToastText)
+	return true
 }
 
 func (a *App) requestPaste() {

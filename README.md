@@ -136,7 +136,7 @@ claude.exe
 | `window.opacity` | 壁纸遮罩不透明度 0.2–1.0（0.82 ≈ 约 18% 壁纸透出） |
 | `window.blur` | 磨砂强度；壁纸会按此模糊，0 关闭模糊 |
 | `window.sidebar_width` | 侧栏宽度（dp） |
-| `window.padding` | 标题栏和侧栏的内边距（dp），右侧终端区四边贴齐 |
+| `window.padding` | 标题栏和侧栏的内边距（dp） |
 | `wallpaper` | 壁纸图片路径，支持 PNG/JPEG/GIF；留空使用渐变背景 |
 
 ## 快捷键

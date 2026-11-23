@@ -3,6 +3,7 @@ package ui
 import (
 	"image"
 	"io"
+	"math"
 	"os/exec"
 	"strings"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
-	"gioui.org/unit"
 
 	"gon/internal/render"
 	"gon/internal/term"
@@ -36,10 +36,18 @@ func (paneDragTag) ImplementsEventTag() {}
 
 type paneScrollTag struct{ p *Pane }
 
+type scrollbarDrag struct {
+	startY, lastY float32
+	startOffset   int
+	pointerID     pointer.ID
+	active        bool
+}
+
 const (
-	paneHeaderHeight = 22
-	minPaneWidth     = 88
-	minPaneHeight    = 76
+	paneHeaderHeight    = 22
+	paneHorizontalInset = 4
+	minPaneWidth        = 88
+	minPaneHeight       = 76
 )
 
 // drawPanes lays out and draws every pane of the active tab.
@@ -68,8 +76,15 @@ func (a *App) drawPanes(gtx layout.Context, area image.Rectangle) {
 	for _, p := range framePanes[:paneCount] {
 		a.drawPane(gtx, p, p == t.Focused(), multi)
 	}
-	if multi && paneCount == len(t.Panes) && a.activeTab() == t {
+	showDividers := multi && paneCount == len(t.Panes) && a.activeTab() == t
+	if showDividers {
 		a.drawDividers(gtx, t.root)
+	}
+	// Register scrollbar input after the divider handles so the track gets the press.
+	for _, p := range framePanes[:paneCount] {
+		a.drawScrollbar(gtx, p, area.Max.X)
+	}
+	if showDividers {
 		a.drawPaneDragPreview(gtx, area)
 	}
 }
@@ -80,7 +95,15 @@ func paneBody(r image.Rectangle, headerHeight int) image.Rectangle {
 }
 
 func (a *App) terminalArea(body image.Rectangle) image.Rectangle {
-	body.Max.X -= min(a.paneScrollWidth, max(0, body.Dx()-a.view.Metrics().CellW))
+	width, cellWidth := body.Dx(), a.view.Metrics().CellW
+	if cellWidth <= 0 || width < cellWidth {
+		return body
+	}
+	inset := min(a.paneInsetPx, (width-cellWidth)/2)
+	// Share the pixels left over after fitting whole columns.
+	remainder := (width - 2*inset) % cellWidth
+	body.Min.X += inset + remainder/2
+	body.Max.X -= inset + (remainder+1)/2
 	return body
 }
 
@@ -98,7 +121,7 @@ func (a *App) drawPane(gtx layout.Context, p *Pane, focused, multi bool) {
 	}
 
 	if !a.settings.open {
-		a.paneInput(gtx, p, a.terminalArea(body), focused)
+		a.paneInput(gtx, p, body, focused)
 	}
 	grid := a.view.Grid(a.terminalArea(body))
 	p.Resize(grid.Cols, grid.Rows, image.Pt(grid.Metrics.CellW, grid.Metrics.CellH))
@@ -116,30 +139,50 @@ func (a *App) drawPane(gtx layout.Context, p *Pane, focused, multi bool) {
 		}
 		p.drawTerminal(gtx, a.view, grid, a.theme.Selection)
 	}()
-
-	a.drawScrollbar(gtx, p, image.Rect(grid.Bounds.Max.X, body.Min.Y, body.Max.X, body.Max.Y), grid.Rows)
 }
 
 // drawScrollbar paints an overlay scrollbar and forwards drags to the pane.
-func (a *App) drawScrollbar(gtx layout.Context, p *Pane, track image.Rectangle, rows int) {
-	off := p.ScrollOffset()
+func (a *App) drawScrollbar(gtx layout.Context, p *Pane, viewportRight int) {
+	drag := &p.scrollbarDrag
+	pane := p.Rect()
+	if pane.Empty() {
+		drag.active = false
+		return
+	}
+	grid := p.presented.grid
+	track := pane
+	track.Min = image.Pt(grid.Bounds.Max.X, grid.Bounds.Min.Y)
+	if track.Max.X < viewportRight {
+		track.Max.X-- // Keep the visible divider available for resizing.
+	}
+	availableWidth := track.Max.X - pane.Min.X
+	if availableWidth <= 0 || track.Dy() <= 0 {
+		drag.active = false
+		return
+	}
 	total := p.ScrollbackLen()
-	if total <= 0 && off == 0 {
+	if total <= 0 {
+		p.scrollbarHover = false
+		drag.active = false
 		return
 	}
-	if track.Empty() {
-		return
+	if !gtx.Enabled() {
+		drag.active = false
 	}
+	off := min(p.ScrollOffset(), total)
+	barH := min(track.Dy(), max(gtx.Dp(24), track.Dy()*grid.Rows/(total+grid.Rows)))
+	travel := track.Dy() - barH
 	tag := paneScrollTag{p: p}
-	func() {
-		defer clip.Rect(track).Push(gtx.Ops).Pop()
-		event.Op(gtx.Ops, tag)
-	}()
+	if !track.Empty() {
+		func() {
+			defer clip.Rect(track).Push(gtx.Ops).Pop()
+			event.Op(gtx.Ops, tag)
+		}()
+	}
 
-	hover := false
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
-			Target: tag, Kinds: pointer.Enter | pointer.Press | pointer.Drag | pointer.Scroll,
+			Target: tag, Kinds: pointer.Enter | pointer.Leave | pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel,
 			ScrollX: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20},
 			ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20},
 		})
@@ -152,45 +195,50 @@ func (a *App) drawScrollbar(gtx layout.Context, p *Pane, track image.Rectangle, 
 		}
 		switch pe.Kind {
 		case pointer.Enter:
-			hover = true
+			p.scrollbarHover = true
+		case pointer.Leave:
+			p.scrollbarHover = false
+		case pointer.Cancel:
+			p.scrollbarHover = false
+			drag.active = false
 		case pointer.Scroll:
 			if pe.Scroll.Y != 0 {
 				p.ScrollBy(wheelLines(pe.Scroll.Y, a.view.Metrics().CellH))
 				a.invalidate()
 			}
-		case pointer.Press, pointer.Drag:
-			trackH := float32(track.Dy())
-			if trackH <= 0 || total <= 0 {
-				continue
+		case pointer.Press:
+			if isPrimaryPress(pe) && travel > 0 {
+				drag.startY, drag.lastY = pe.Position.Y, pe.Position.Y
+				drag.startOffset = min(p.ScrollOffset(), total)
+				drag.pointerID = pe.PointerID
+				drag.active = true
+				gtx.Execute(pointer.GrabCmd{Tag: tag, ID: pe.PointerID})
 			}
-			frac := (pe.Position.Y - float32(track.Min.Y)) / trackH
-			if frac < 0 {
-				frac = 0
+		case pointer.Drag:
+			if drag.active && drag.pointerID == pe.PointerID && pe.Position.Y != drag.lastY && travel > 0 {
+				drag.lastY = pe.Position.Y
+				moved := float64(pe.Position.Y - drag.startY)
+				lines := int(math.Round(moved * float64(total) / float64(travel)))
+				p.SetScrollOffset(drag.startOffset - lines)
+				a.invalidate()
 			}
-			if frac > 1 {
-				frac = 1
+		case pointer.Release:
+			if drag.pointerID == pe.PointerID {
+				drag.active = false
 			}
-			p.SetScrollOffset(int(float32(total) * (1 - frac)))
-			a.invalidate()
 		}
 	}
 
-	if total <= 0 {
-		return
-	}
-	barH := track.Dy() * rows / (total + rows)
-	if barH < gtx.Dp(unit.Dp(24)) {
-		barH = gtx.Dp(unit.Dp(24))
-	}
-	if barH > track.Dy() {
-		barH = track.Dy()
-	}
-	y := track.Min.Y + (track.Dy()-barH)*(total-off)/total
-	w := gtx.Dp(unit.Dp(4))
+	y := track.Min.Y + travel*(total-off)/total
+	hover := gtx.Enabled() && (p.scrollbarHover || drag.active)
+	wide := min(availableWidth, max(1, gtx.Dp(7)))
+	w := min(wide, max(1, gtx.Dp(4)))
 	if hover {
-		w = gtx.Dp(unit.Dp(7))
+		w = wide
 	}
-	bar := image.Rect(track.Max.X-w-gtx.Dp(unit.Dp(2)), y, track.Max.X-gtx.Dp(unit.Dp(2)), y+barH)
+	// Keep the right edge fixed as the thumb expands inward.
+	right := track.Max.X - max(0, (track.Dx()-wide+1)/2)
+	bar := image.Rect(right-w, y, right, y+barH)
 	al := uint8(0x40)
 	if off > 0 {
 		al = 0xbb
@@ -198,7 +246,9 @@ func (a *App) drawScrollbar(gtx layout.Context, p *Pane, track image.Rectangle, 
 	if hover {
 		al = 0xff
 	}
-	paint.FillShape(gtx.Ops, NRGBA(a.theme.Dim, al), clip.UniformRRect(bar, w/2).Op(gtx.Ops))
+	defer clip.UniformRRect(bar, w/2).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, tag)
+	paint.Fill(gtx.Ops, NRGBA(a.theme.Dim, al))
 }
 
 func (a *App) updatePaneControls(gtx layout.Context, t *Tab) {
@@ -428,9 +478,11 @@ func (a *App) paneArea() image.Rectangle {
 }
 
 // paneInput processes pointer, wheel, keyboard and paste input for one pane.
-func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focused bool) {
+func (a *App) paneInput(gtx layout.Context, p *Pane, body image.Rectangle, focused bool) {
 	tag := paneTag{p: p}
-	func() {
+	// Register the region after processing shortcuts that can change the cell width.
+	defer func() {
+		area := a.terminalArea(body)
 		defer op.Offset(area.Min).Push(gtx.Ops).Pop()
 		defer clip.Rect(image.Rectangle{Max: area.Size()}).Push(gtx.Ops).Pop()
 		cursor := pointer.CursorText
@@ -443,7 +495,7 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, area image.Rectangle, focus
 
 	grid := p.presented.grid
 	if grid.Bounds.Empty() {
-		grid = a.view.Grid(area)
+		grid = a.view.Grid(a.terminalArea(body))
 	}
 
 	// Consecutive mouse drags describe one caret. Forward only the last one
@@ -571,7 +623,9 @@ func (a *App) handlePanePointer(gtx layout.Context, p *Pane, ev pointer.Event, g
 		}
 		if ev.Buttons.Contain(pointer.ButtonSecondary) {
 			if _, _, _, _, selected := p.SelectionRange(); selected {
-				a.copyPaneSelection(p)
+				if a.copyPaneSelection(p) {
+					p.SelectionClear()
+				}
 				return
 			}
 		}

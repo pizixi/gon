@@ -44,6 +44,8 @@ type Pane struct {
 	// rect is the pane geometry in window pixels.
 	rect            image.Rectangle
 	closeButton     widget.Clickable
+	scrollbarHover  bool
+	scrollbarDrag   scrollbarDrag
 	presented       panePresentation
 	mouseButton     int // last reported mouse button plus one, zero when released
 	mousePosition   image.Point

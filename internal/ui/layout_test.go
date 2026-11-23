@@ -83,6 +83,19 @@ func (h *layoutTest) clickControl(t *testing.T, label string, index int) {
 	h.click(r.Min.Add(r.Size().Div(2)))
 }
 
+func assertPaneHorizontalInsets(t *testing.T, p *Pane, base int) {
+	t.Helper()
+	r, grid := p.Rect(), p.presented.grid
+	left := grid.Bounds.Min.X - r.Min.X
+	right := r.Max.X - grid.Bounds.Max.X
+	if min(left, right) < base || max(left, right)-min(left, right) > 1 {
+		t.Errorf("pane %v has horizontal insets of %d and %d px, want at least %d px and within 1 px", r, left, right, base)
+	}
+	if grid.Bounds.Dx() != grid.Cols*grid.Metrics.CellW || left+right-2*base >= grid.Metrics.CellW {
+		t.Errorf("pane %v grid %v should fill the available whole columns", r, grid.Bounds)
+	}
+}
+
 func TestTerminalRightClickCopiesAndWheelUpShowsHistory(t *testing.T) {
 	a := New(config.Default(), nil, "")
 	a.started = true
@@ -99,8 +112,21 @@ func TestTerminalRightClickCopiesAndWheelUpShowsHistory(t *testing.T) {
 	p.SelectRange(y, x-4, y, x-1)
 	at := p.Rect().Min.Add(image.Pt(18, 18))
 	h.mouse(pointer.Press, at, pointer.ButtonSecondary)
-	if a.clipboard != "copy" {
-		t.Fatalf("right click copied %q", a.clipboard)
+	if _, _, _, _, selected := p.SelectionRange(); selected {
+		t.Fatal("the copied selection was still highlighted")
+	}
+	if _, data, ok := h.router.WriteClipboard(); !ok || string(data) != "copy" {
+		t.Fatalf("right click copied %q", data)
+	}
+	if a.toast != copiedToastText {
+		t.Fatalf("copy notification = %q", a.toast)
+	}
+	h.mouse(pointer.Release, at, 0)
+
+	p.SelectRange(y, x, y, x)
+	h.mouse(pointer.Press, at, pointer.ButtonSecondary)
+	if _, _, _, _, selected := p.SelectionRange(); !selected || a.toast == copiedToastText {
+		t.Fatal("a blank selection was treated as a successful copy")
 	}
 	h.mouse(pointer.Release, at, 0)
 	p.SelectionClear()
@@ -189,6 +215,12 @@ func TestSidebarToggleExpandsTerminal(t *testing.T) {
 	h := &layoutTest{App: a, size: image.Pt(900, 601)}
 	h.frame()
 	before := a.paneArea()
+	row := h.controlBounds(t, "终端", 1)
+	divider := row.Max.X + a.pad/2
+	if divider != pane.Rect().Min.X {
+		t.Fatalf("sidebar divider at %d should meet pane %v", divider, pane.Rect())
+	}
+	assertPaneHorizontalInsets(t, pane, 4)
 	toggle := h.controlBounds(t, "隐藏侧栏", 0)
 	plus := h.controlBounds(t, "新建标签页", 0)
 	if plus.Max.X >= before.Min.X || plus.Min.X != toggle.Max.X+3 || plus.Max.Y > a.hdrH {
@@ -198,6 +230,7 @@ func TestSidebarToggleExpandsTerminal(t *testing.T) {
 	if !a.sidebarHidden || pane.Rect() != a.paneArea() || pane.Rect().Min.X != 0 {
 		t.Fatalf("collapsed sidebar left terminal at %v", pane.Rect())
 	}
+	assertPaneHorizontalInsets(t, pane, 4)
 	grid := a.view.Grid(a.terminalArea(pane.Rect()))
 	cols, rows := grid.Cols, grid.Rows
 	if c, r := pane.Size(); c != cols || r != rows {
@@ -349,6 +382,93 @@ func TestPaneDragSwapsAndDividersResizeTogether(t *testing.T) {
 		t.Fatalf("horizontal divider did not clamp to pane minimum: %v, %v", first.Rect(), third.Rect())
 	}
 	assertTiled(t, tb, h.paneArea())
+
+	for _, pane := range tb.Panes {
+		assertPaneHorizontalInsets(t, pane, 4)
+	}
+	h.clickControl(t, "隐藏侧栏", 0)
+	for _, pane := range tb.Panes {
+		assertPaneHorizontalInsets(t, pane, 4)
+	}
+}
+
+func TestSplitPaneScrollbarAndDividerHaveSeparateTargets(t *testing.T) {
+	a := New(config.Default(), nil, "")
+	a.started = true
+	defer a.shutdown()
+	tab := new(Tab)
+	left := newInputPane()
+	tab.addPane(left, SplitRight)
+	tab.addPane(newInputPane(), SplitRight)
+	a.tabs = []*Tab{tab}
+	paneWidth := 36*a.view.Metrics().CellW + 8
+	h := &layoutTest{App: a, size: image.Pt(a.sidebarWidth(909)+2*paneWidth, 601)}
+	h.frame()
+	left.parser = term.NewParser(left.scr)
+	left.applyOutput([]byte(strings.Repeat("line\r\n", left.rows+40)))
+	h.frame()
+
+	bounds := left.Rect()
+	grid := left.presented.grid.Bounds
+	if gap := bounds.Max.X - grid.Max.X; gap != 4 {
+		t.Fatalf("right gap = %d px, want 4 px for the narrow scrollbar gutter", gap)
+	}
+	scrollRight := bounds.Max.X - 1
+	thumbY := bounds.Max.Y - 32
+	h.click(image.Pt(scrollRight-4, grid.Min.Y+20))
+	if left.ScrollOffset() != 0 || tab.Focused() != left {
+		t.Fatal("the terminal cell above the scrollbar thumb did not receive the click")
+	}
+	for _, width := range []int{4, 7} {
+		if width == 7 {
+			h.mouse(pointer.Move, image.Pt(scrollRight-1, thumbY), 0)
+			h.frame()
+		}
+		thumb := image.Pt(scrollRight-width, thumbY)
+		h.mouse(pointer.Press, thumb, pointer.ButtonPrimary)
+		if got := left.ScrollOffset(); got != 0 {
+			t.Fatalf("pressing the %d dp thumb changed the scroll offset to %d", width, got)
+		}
+		end := thumb.Sub(image.Pt(0, 64))
+		h.mouse(pointer.Move, end, pointer.ButtonPrimary)
+		h.mouse(pointer.Release, end, 0)
+		if left.ScrollOffset() == 0 {
+			t.Fatalf("the left edge of the %d dp thumb did not receive the drag", width)
+		}
+		left.SetScrollOffset(0)
+		h.frame()
+	}
+
+	start := image.Pt(bounds.Max.X-2, left.presented.grid.Bounds.Min.Y+20)
+	offset := left.ScrollbackLen() / 2
+	left.SetScrollOffset(offset)
+	h.frame()
+	h.click(start)
+	if got := left.ScrollOffset(); got != offset {
+		t.Fatalf("clicking the track changed the scroll offset from %d to %d", offset, got)
+	}
+	h.mouse(pointer.Press, start, pointer.ButtonPrimary)
+	// Horizontal movement across the divider keeps the drag without scrolling.
+	across := start.Add(image.Pt(40, 0))
+	h.mouse(pointer.Move, across, pointer.ButtonPrimary)
+	if got := left.ScrollOffset(); got != offset || a.resizeTile != nil {
+		t.Fatalf("horizontal drag gave offset %d, want %d with no active divider", got, offset)
+	}
+	end := across.Add(image.Pt(0, bounds.Dy()/2))
+	h.mouse(pointer.Move, end, pointer.ButtonPrimary)
+	h.mouse(pointer.Release, end, 0)
+	if got := left.ScrollOffset(); got >= offset || left.Rect() != bounds {
+		t.Fatalf("scrollbar drag gave offset %d (started at %d) and pane %v (want %v)", got, offset, left.Rect(), bounds)
+	}
+
+	start.X = scrollRight
+	end = start.Add(image.Pt(40, 0))
+	h.mouse(pointer.Press, start, pointer.ButtonPrimary)
+	h.mouse(pointer.Move, end, pointer.ButtonPrimary)
+	h.mouse(pointer.Release, end, 0)
+	if got := left.Rect().Max.X; got != bounds.Max.X+40 {
+		t.Fatalf("divider moved to %d, want %d", got, bounds.Max.X+40)
+	}
 }
 
 func TestTerminalSingleClickDoesNotSelect(t *testing.T) {
@@ -361,7 +481,7 @@ func TestTerminalSingleClickDoesNotSelect(t *testing.T) {
 	a.tabs = []*Tab{tb}
 	h := &layoutTest{App: a, size: image.Pt(909, 601)}
 	h.frame()
-	start := p.Rect().Min.Add(image.Pt(2, 2))
+	start := p.presented.grid.Bounds.Min.Add(image.Pt(2, 2))
 	h.click(start)
 	if _, _, _, _, selected := p.SelectionRange(); selected {
 		t.Fatal("a click highlighted a cell")
@@ -392,6 +512,9 @@ func TestSplitPaneSelectionAndMouseUseTheDrawnGrid(t *testing.T) {
 	p.applyOutput([]byte("header\r\nA中👩🏻‍💻e\u0301Z"))
 	h.frame()
 	grid := p.presented.grid
+	for _, pane := range tb.Panes {
+		assertPaneHorizontalInsets(t, pane, 6)
+	}
 	point := func(x, y int) image.Point {
 		return grid.Bounds.Min.Add(image.Pt(x*grid.Metrics.CellW+grid.Metrics.CellW/2, y*grid.Metrics.CellH+grid.Metrics.CellH/2))
 	}
@@ -415,6 +538,23 @@ func TestSplitPaneSelectionAndMouseUseTheDrawnGrid(t *testing.T) {
 	for _, want := range []string{"\x1b[<0;5;3M", "\x1b[<32;6;3M", "\x1b[<0;6;3m"} {
 		if got := takeWrite(t, p); got != want {
 			t.Fatalf("mouse report = %q, want %q", got, want)
+		}
+	}
+
+	// Zoom shortcuts can change the cell width while processing frame input.
+	fontSize := a.view.FontSize()
+	for range 4 {
+		h.router.Queue(key.Event{Name: "=", Modifiers: key.ModCtrl, State: key.Press})
+	}
+	h.frame()
+	if got := a.view.FontSize(); got != fontSize+4 {
+		t.Fatalf("zoomed font size = %d, want %d", got, fontSize+4)
+	}
+	assertPaneHorizontalInsets(t, p, 6)
+	h.click(p.presented.grid.Bounds.Min)
+	for _, want := range []string{"\x1b[<0;1;1M", "\x1b[<0;1;1m"} {
+		if got := takeWrite(t, p); got != want {
+			t.Fatalf("mouse report after zoom = %q, want %q", got, want)
 		}
 	}
 }
