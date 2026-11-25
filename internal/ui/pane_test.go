@@ -189,10 +189,11 @@ func TestForwardedTabKeepsCallerEnvironment(t *testing.T) {
 		return launch.Request{
 			Context: launch.Context{Cwd: root, Dir: dir, Env: env},
 			Command: []string{"pwsh.exe", "-NoProfile", "-NoLogo", "-NoExit", "-Command",
-				`& {
+				fmt.Sprintf(`& {
 $host.UI.RawUI.WindowTitle = "tab-$env:GON_TEST_TAB_NAME"
 Write-Output "env=$env:GON_TEST_TAB_NAME,dir=$((Get-Item .).Name),only=$env:GON_TEST_TAB_ONLY_FIRST"
-}`},
+Write-Output "arg=%s"
+}`, name)},
 		}
 	}
 	firstRequest, secondRequest := requestFor("FIRST", true), requestFor("SECOND", false)
@@ -302,6 +303,70 @@ Write-Output "env=$env:GON_TEST_TAB_NAME,dir=$((Get-Item .).Name),only=$env:GON_
 	}
 	h.mouse(pointer.Move, tip.Min, 0)
 	assertTooltipHidden()
+
+	h.size = image.Pt(1180, 760)
+	h.frame()
+	a.SplitActive(SplitDown)
+	split := a.currentPane()
+	if split == second || len(a.activeTab().Panes) != 2 {
+		t.Fatalf("splitting the forwarded tab failed: %s", a.toast)
+	}
+	if split.sess.Executable() != second.sess.Executable() || split.sess.StartingDirectory() != secondRequest.Dir {
+		t.Fatalf("split started %q in %q", split.sess.Executable(), split.sess.StartingDirectory())
+	}
+	if !waitText(t, split, "env=SECOND,dir=SECOND directory,only=\narg=SECOND\n", 8*time.Second) {
+		t.Fatalf("split did not inherit the forwarded launch: %q", screenText(split))
+	}
+}
+
+func TestSplitKeepsOriginalShellProfile(t *testing.T) {
+	if !pty.Available() {
+		t.Skip("ConPTY unavailable")
+	}
+	startDir := t.TempDir()
+	profileDir := filepath.Join(startDir, "unavailable at launch")
+	t.Setenv("USERPROFILE", startDir)
+	t.Setenv("GON_TEST_SPLIT_PROFILE", "original")
+	cfg := config.Default()
+	cfg.Shells = []config.Shell{
+		{Name: "Default", Command: "cmd.exe", Args: []string{"/D", "/Q"}},
+		{Name: "Custom Shell", Command: "cmd.exe", Dir: profileDir,
+			Args: []string{"/D", "/Q", "/K", "echo PROFILE-%GON_TEST_SPLIT_PROFILE%"}},
+	}
+	a := New(cfg, nil, "")
+	defer a.shutdown()
+	a.lastSize = image.Pt(1180, 760)
+	tab, err := a.NewTab(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkLaunch := func(p *Pane) {
+		t.Helper()
+		if p.ShellName() != "Custom Shell" || p.sess.StartingDirectory() != startDir {
+			t.Fatalf("started profile %q in %q", p.ShellName(), p.sess.StartingDirectory())
+		}
+		if !waitText(t, p, "PROFILE-original", 5*time.Second) {
+			t.Fatalf("wrong profile args or environment: %q", screenText(p))
+		}
+	}
+	previous := tab.Focused()
+	checkLaunch(previous)
+	cfg.Shells[1].Args[3] = "echo changed"
+	t.Setenv("GON_TEST_SPLIT_PROFILE", "changed")
+	if err := os.Mkdir(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, mode := range []SplitMode{SplitRight, SplitDown} {
+		a.SplitActive(mode)
+		pane := tab.Focused()
+		if pane == previous || len(tab.Panes) != 2 {
+			t.Fatalf("splitting the configured tab failed: %s", a.toast)
+		}
+		checkLaunch(pane)
+		a.closePane(previous)
+		previous = pane
+	}
 }
 
 func TestCloseFirstTabKeepsOtherShellRunning(t *testing.T) {

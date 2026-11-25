@@ -102,14 +102,7 @@ func (s *Session) ModernConsole() bool {
 	return ok && console.api.modern
 }
 
-func startPTY(command string, args []string, dir string, env []string, cols, rows int, s *Session) (ptmx, func(), error) {
-	if !Available() {
-		return nil, nil, errors.New("ConPTY is not available (Windows 10 1809 or later required)")
-	}
-	exe, err := resolveCommand(command, dir, environmentMap(env))
-	if err != nil {
-		return nil, nil, err
-	}
+func startPTY(exe string, args []string, dir string, env []string, cols, rows int, s *Session) (ptmx, func(), error) {
 	appName, err := syscall.UTF16PtrFromString(exe)
 	if err != nil {
 		return nil, nil, err
@@ -200,7 +193,6 @@ func startPTY(command string, args []string, dir string, env []string, cols, row
 		return nil, nil, fmt.Errorf("CreateProcess: %w", err)
 	}
 	windows.CloseHandle(pi.Thread)
-	s.executable = exe
 	var token windows.Token
 	if windows.OpenProcessToken(pi.Process, windows.TOKEN_QUERY, &token) == nil {
 		s.elevated = token.IsElevated()

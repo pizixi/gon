@@ -311,28 +311,32 @@ func (a *App) newShellTab(shellIdx int, scope launch.Context) (*Tab, error) {
 }
 
 func (a *App) newTab(sh config.Shell, scope launch.Context) (*Tab, error) {
-	p, err := a.newPane(sh, scope, a.paneArea())
+	options := pty.Options{Dir: sh.Dir, CallerDir: scope.Cwd, Env: scope.Env}
+	if scope.Dir != "" {
+		options.Dir, options.RequireDir = scope.Dir, true
+	}
+	startup, err := pty.PrepareLaunch(sh.Command, sh.Args, options)
 	if err != nil {
 		return nil, err
 	}
-	t := &Tab{Title: p.ShellName(), launch: scope}
+	p, err := a.newPane(sh.Name, startup, a.paneArea())
+	if err != nil {
+		return nil, err
+	}
+	t := &Tab{Title: p.ShellName(), launch: startup}
 	t.addPane(p, SplitRight)
 	a.tabs = append(a.tabs, t)
 	a.activateTab(len(a.tabs) - 1)
 	return t, nil
 }
 
-func (a *App) newPane(sh config.Shell, scope launch.Context, area image.Rectangle) (*Pane, error) {
+func (a *App) newPane(shellName string, startup pty.Launch, area image.Rectangle) (*Pane, error) {
 	cols, rows := 80, 24
 	if !area.Empty() {
 		area = a.terminalArea(area)
 		cols, rows = a.view.GridFrom(area.Dx(), area.Dy())
 	}
-	options := pty.Options{Dir: sh.Dir, CallerDir: scope.Cwd, Env: scope.Env}
-	if scope.Dir != "" {
-		options.Dir, options.RequireDir = scope.Dir, true
-	}
-	p, err := newPaneWithOptions(sh.Name, sh.Command, sh.Args, options, cols, rows, a.cfg.Scrollback)
+	p, err := newPaneWithLaunch(shellName, startup, cols, rows, a.cfg.Scrollback)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +359,7 @@ func (a *App) newPane(sh config.Shell, scope launch.Context, area image.Rectangl
 	return p, nil
 }
 
-// SplitActive divides the focused pane and starts a new shell.
+// SplitActive divides the focused pane and reuses the tab's launch options.
 func (a *App) SplitActive(mode SplitMode) {
 	t := a.activeTab()
 	if t == nil || t.Focused() == nil {
@@ -366,19 +370,15 @@ func (a *App) SplitActive(mode SplitMode) {
 		return
 	}
 	t.Relayout(a.paneArea(), a.minPaneSize)
-	src := t.Focused().Rect()
+	focused := t.Focused()
+	src := focused.Rect()
 	span := mode.axis(src.Size())
 	if span < 2*mode.axis(a.minPaneSize) {
 		a.notify("空间不足，无法继续分屏")
 		return
 	}
 	_, area := splitPaneArea(src, mode, (span+1)/2)
-	sh, err := a.shellProfile(a.cfg.DefaultShell)
-	if err != nil {
-		a.notify("启动失败：" + err.Error())
-		return
-	}
-	p, err := a.newPane(sh, t.launch, paneBody(area, a.paneHeaderH))
+	p, err := a.newPane(focused.ShellName(), t.launch, paneBody(area, a.paneHeaderH))
 	if err != nil {
 		a.notify("启动失败：" + err.Error())
 		return

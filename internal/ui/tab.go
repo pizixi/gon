@@ -7,7 +7,7 @@ import (
 
 	"gioui.org/widget"
 
-	"gon/internal/launch"
+	"gon/internal/pty"
 )
 
 // Tab holds the terminal sessions and their split layout.
@@ -17,7 +17,7 @@ type Tab struct {
 	Panes       []*Pane
 	Focus       int
 	root        *paneTile
-	launch      launch.Context
+	launch      pty.Launch
 	closeButton widget.Clickable
 	closeShown  bool
 }

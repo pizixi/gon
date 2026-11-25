@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,15 @@ type Options struct {
 	RequireDir bool
 }
 
+// Launch captures a resolved program and the arguments, directory, and
+// environment with which to start it.
+type Launch struct {
+	executable string
+	args       []string
+	dir        string
+	env        []string
+}
+
 // Start launches command with args inside a pseudo terminal of cols x rows.
 func Start(command string, args []string, dir string, cols, rows int) (*Session, error) {
 	return StartWithOptions(command, args, Options{Dir: dir}, cols, rows)
@@ -45,8 +55,17 @@ func Start(command string, args []string, dir string, cols, rows int) (*Session,
 
 // StartWithOptions launches a process using an explicit launch environment.
 func StartWithOptions(command string, args []string, options Options, cols, rows int) (*Session, error) {
+	launch, err := PrepareLaunch(command, args, options)
+	if err != nil {
+		return nil, err
+	}
+	return launch.Start(cols, rows)
+}
+
+// PrepareLaunch resolves the startup options once for one or more sessions.
+func PrepareLaunch(command string, args []string, options Options) (Launch, error) {
 	if command == "" {
-		return nil, errors.New("empty command")
+		return Launch{}, errors.New("empty command")
 	}
 	env := options.Env
 	if env == nil {
@@ -62,7 +81,7 @@ func StartWithOptions(command string, args []string, options Options, cols, rows
 		dir = absoluteFrom(cwd, dir, values)
 		if !isDir(dir) {
 			if options.RequireDir {
-				return nil, fmt.Errorf("starting directory is unavailable: %s", dir)
+				return Launch{}, fmt.Errorf("starting directory is unavailable: %s", dir)
 			}
 			dir = ""
 		}
@@ -73,9 +92,30 @@ func StartWithOptions(command string, args []string, options Options, cols, rows
 			dir = cwd
 		}
 	}
+	if dir != "" && !filepath.IsAbs(dir) {
+		absoluteDir, err := filepath.Abs(dir)
+		if err != nil {
+			return Launch{}, err
+		}
+		dir = absoluteDir
+	}
+	if !Available() {
+		return Launch{}, errors.New("ConPTY is not available (Windows 10 1809 or later required)")
+	}
+	executable, err := resolveCommand(command, dir, values)
+	if err != nil {
+		return Launch{}, err
+	}
+	return Launch{executable: executable, args: slices.Clone(args), dir: dir, env: slices.Clone(env)}, nil
+}
 
-	s := &Session{done: make(chan struct{}), alive: true, exit: -1, startingDir: dir}
-	p, closer, err := startPTY(command, args, dir, env, cols, rows, s)
+// Start opens a new pseudo terminal with the captured launch options.
+func (l Launch) Start(cols, rows int) (*Session, error) {
+	if l.executable == "" {
+		return nil, errors.New("empty command")
+	}
+	s := &Session{done: make(chan struct{}), alive: true, exit: -1, executable: l.executable, startingDir: l.dir}
+	p, closer, err := startPTY(l.executable, l.args, l.dir, l.env, cols, rows, s)
 	if err != nil {
 		return nil, err
 	}

@@ -77,6 +77,14 @@ func NewPane(shellName, command string, args []string, dir string, cols, rows, s
 }
 
 func newPaneWithOptions(shellName, command string, args []string, options pty.Options, cols, rows, scrollback int) (*Pane, error) {
+	startup, err := pty.PrepareLaunch(command, args, options)
+	if err != nil {
+		return nil, err
+	}
+	return newPaneWithLaunch(shellName, startup, cols, rows, scrollback)
+}
+
+func newPaneWithLaunch(shellName string, startup pty.Launch, cols, rows, scrollback int) (*Pane, error) {
 	if cols < 1 {
 		cols = 80
 	}
@@ -87,7 +95,7 @@ func newPaneWithOptions(shellName, command string, args []string, options pty.Op
 	p := &Pane{scr: scr, cols: cols, rows: rows, shellName: shellName}
 	p.parser = term.NewParser(scr)
 
-	sess, err := pty.StartWithOptions(command, args, options, cols, rows)
+	sess, err := startup.Start(cols, rows)
 	if err != nil {
 		return nil, err
 	}
