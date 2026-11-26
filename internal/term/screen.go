@@ -2,6 +2,7 @@ package term
 
 import (
 	"image"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,8 +16,7 @@ type Screen struct {
 	Cols, Rows    int
 	MaxScrollback int
 
-	cells        []Cell
-	wraps        []int
+	lines        []screenLine
 	scrollback   []screenLine
 	oldest       int
 	historyAdded uint64
@@ -64,8 +64,7 @@ type Screen struct {
 	g0, g1                        byte
 	shift1                        bool
 	alt                           bool
-	mainCells                     []Cell
-	mainWraps                     []int
+	mainLines                     []screenLine
 	mainCursor                    cursorState
 	mainSavedCursor               cursorState
 	mainScrollTop                 int
@@ -123,8 +122,7 @@ func (s *Screen) Reset() {
 	s.resizePaint = resizePaint{}
 	s.syncUntil = time.Time{}
 	s.alt = false
-	s.mainCells = nil
-	s.mainWraps = nil
+	s.mainLines = nil
 	s.scrollTop = 0
 	s.scrollBot = s.Rows - 1
 	s.CursorX, s.CursorY = 0, 0
@@ -137,8 +135,7 @@ func (s *Screen) Reset() {
 	for i := range s.tabstops {
 		s.tabstops[i] = i%8 == 0
 	}
-	s.cells = blankCells(s.Cols * s.Rows)
-	s.wraps = make([]int, s.Rows)
+	s.lines = newGrid(s.Cols, s.Rows)
 	s.FgColor, s.BgColor, s.CursorColor = DefaultColor, DefaultColor, DefaultColor
 	s.lastGlyph = Cell{}
 	s.endGrapheme()
@@ -153,20 +150,15 @@ func (s *Screen) Resize(cols, rows int, positions ...*image.Point) {
 	if rows < 1 {
 		rows = 1
 	}
-	if cols == s.Cols && rows == s.Rows && s.cells != nil {
+	if cols == s.Cols && rows == s.Rows && s.lines != nil {
 		return
 	}
 	s.historyReset++
 	s.resizePaint = resizePaint{}
 	s.endGrapheme()
 	if s.alt {
-		s.mainCells, s.mainWraps = s.reflow(cols, rows, s.mainCells, s.mainWraps, &s.mainCursor, &s.mainSavedCursor, nil)
-		s.cells = resizeCells(s.cells, s.Cols, s.Rows, cols, rows)
-		s.wraps = append(make([]int, 0, rows), s.wraps[:min(rows, len(s.wraps))]...)
-		s.wraps = s.wraps[:rows]
-		for y, end := range s.wraps {
-			s.wraps[y] = min(end, cols)
-		}
+		s.mainLines = s.reflow(cols, rows, s.mainLines, &s.mainCursor, &s.mainSavedCursor, nil)
+		s.lines = resizeGrid(s.lines, cols, rows)
 		for _, pos := range positions {
 			if pos.Y >= rows {
 				*pos = image.Pt(-1, -1)
@@ -179,7 +171,7 @@ func (s *Screen) Resize(cols, rows int, positions ...*image.Point) {
 		s.wrapPending = false
 	} else {
 		cursor := s.cursorState()
-		s.cells, s.wraps = s.reflow(cols, rows, s.cells, s.wraps, &cursor, &s.savedCursor, positions)
+		s.lines = s.reflow(cols, rows, s.lines, &cursor, &s.savedCursor, positions)
 		s.CursorX, s.CursorY, s.wrapPending = cursor.x, cursor.y, cursor.wrap
 		if len(s.scrollback) != 0 {
 			// Lines the application wrapped at the old width may occupy
@@ -199,32 +191,31 @@ func (s *Screen) Resize(cols, rows int, positions ...*image.Point) {
 	s.Dirty = true
 }
 
-func blankCells(n int) []Cell {
-	b := make([]Cell, n)
-	for i := range b {
-		b[i] = Blank
+func newGrid(cols, rows int) []screenLine {
+	cells := make([]Cell, cols*rows)
+	for i := range cells {
+		cells[i] = Blank
 	}
-	return b
+	lines := make([]screenLine, rows)
+	for y := range lines {
+		end := (y + 1) * cols
+		lines[y].cells = cells[y*cols : end : end]
+	}
+	return lines
 }
 
-func resizeCells(old []Cell, oldCols, oldRows, cols, rows int) []Cell {
-	nc := blankCells(cols * rows)
-	if old == nil || oldCols <= 0 || oldRows <= 0 {
-		return nc
-	}
-	rc := min(cols, oldCols)
-	for y := 0; y < min(rows, oldRows); y++ {
-		copy(nc[y*cols:y*cols+rc], old[y*oldCols:y*oldCols+rc])
-	}
-	if cols < oldCols {
+func resizeGrid(old []screenLine, cols, rows int) []screenLine {
+	lines := newGrid(cols, rows)
+	for y, src := range old[:min(len(old), rows)] {
+		dst := &lines[y]
+		copy(dst.cells, src.cells)
+		dst.wrap = min(src.wrap, cols)
 		// A wide glyph must not be cut in half.
-		for y := 0; y < min(rows, oldRows); y++ {
-			if nc[y*cols+cols-1].W == 2 {
-				nc[y*cols+cols-1] = Blank
-			}
+		if cols < len(src.cells) && dst.cells[cols-1].W == 2 {
+			dst.cells[cols-1] = Blank
 		}
 	}
-	return nc
+	return lines
 }
 
 // CellAt returns the cell at screen coordinates.
@@ -232,7 +223,7 @@ func (s *Screen) CellAt(x, y int) Cell {
 	if x < 0 || y < 0 || x >= s.Cols || y >= s.Rows {
 		return Blank
 	}
-	return s.cells[y*s.Cols+x]
+	return s.lines[y].cells[x]
 }
 
 // TotalLines is the number of scrollback lines plus screen rows.
@@ -266,11 +257,18 @@ func (s *Screen) SetScrollbackLimit(limit int) {
 	}
 }
 
-// AbsLine returns the line with the given absolute index, where index 0 is the
-// oldest scrollback line. The returned slice aliases internal storage and must
-// not be modified or retained across frames.
+// AbsLine returns the stored cells of an absolute line. Index 0 is the oldest
+// scrollback line. Columns between len(AbsLine(abs)) and LineWidth(abs) are
+// default blanks. Treat the slice as read-only and use it before the next update.
 func (s *Screen) AbsLine(abs int) []Cell {
 	return s.line(abs).cells
+}
+
+// LineWidth returns the number of columns in an absolute line, including
+// any omitted default blanks, or zero for an invalid line.
+func (s *Screen) LineWidth(abs int) int {
+	line := s.line(abs)
+	return len(line.cells) + line.padding
 }
 
 // WrapColumn is the end of a row that continues on the next display row.
@@ -288,7 +286,7 @@ func (s *Screen) line(abs int) screenLine {
 	if y >= s.Rows {
 		return screenLine{}
 	}
-	return screenLine{s.cells[y*s.Cols : (y+1)*s.Cols], s.wraps[y]}
+	return s.lines[y]
 }
 
 // ViewTop returns the absolute line index shown at the top of the viewport when
@@ -380,14 +378,14 @@ func (s *Screen) wrapBefore(w int) {
 func (s *Screen) writeGlyph(glyph Cell) {
 	w := int(glyph.W)
 	y, x := s.CursorY, s.CursorX
-	idx := y*s.Cols + x
-	s.clearWideAt(idx)
+	row := s.lines[y].cells
+	s.clearWideAt(row, x)
 	if w == 2 {
-		s.clearWideAt(idx + 1)
-		s.cells[idx+1] = Cell{Cont: true, A: glyph.A}
+		s.clearWideAt(row, x+1)
+		row[x+1] = Cell{Cont: true, A: glyph.A}
 	}
-	s.cells[idx] = glyph
-	s.lastGlyph, s.glyphAt = glyph, idx
+	row[x] = glyph
+	s.lastGlyph, s.glyphAt = glyph, y*s.Cols+x
 	s.wrapPending = x+w >= s.Cols
 	if s.wrapPending {
 		s.CursorX = s.Cols - 1
@@ -401,8 +399,9 @@ func (s *Screen) extendGrapheme(r rune) bool {
 	if r < 0x80 || s.glyphAt < 0 {
 		return false
 	}
-	idx := s.glyphAt
-	glyph := s.cells[idx]
+	y, x := s.glyphAt/s.Cols, s.glyphAt%s.Cols
+	row := s.lines[y].cells
+	glyph := row[x]
 	if len(glyph.Combining) >= 128 {
 		return false
 	}
@@ -414,18 +413,18 @@ func (s *Screen) extendGrapheme(r rune) bool {
 	}
 	glyph.Combining += string(r)
 	width = max(1, min(width, s.Cols, 2))
-	if idx%s.Cols+width > s.Cols && !s.autowrap {
+	if x+width > s.Cols && !s.autowrap {
 		width = 1
 	}
 	if uint8(width) == glyph.W {
-		s.cells[idx], s.lastGlyph = glyph, glyph
+		row[x], s.lastGlyph = glyph, glyph
 		s.Dirty = true
 		return true
 	}
-	s.CursorX, s.CursorY = idx%s.Cols, idx/s.Cols
+	s.CursorX, s.CursorY = x, y
 	s.wrapPending = false
 	if s.CursorX+width > s.Cols && s.autowrap {
-		s.cells[idx] = s.Blank()
+		row[x] = s.Blank()
 	}
 	s.wrapBefore(width)
 	glyph.W = uint8(width)
@@ -433,18 +432,15 @@ func (s *Screen) extendGrapheme(r rune) bool {
 	return true
 }
 
-func (s *Screen) clearWideAt(idx int) {
-	if idx < 0 || idx >= len(s.cells) {
-		return
-	}
-	switch s.cells[idx].W {
+func (s *Screen) clearWideAt(row []Cell, x int) {
+	switch row[x].W {
 	case 0: // right half: clear the left half too
-		if idx%s.Cols > 0 {
-			s.cells[idx-1] = s.Blank()
+		if x > 0 {
+			row[x-1] = s.Blank()
 		}
 	case 2: // left half: clear the right half too
-		if idx+1 < len(s.cells) {
-			s.cells[idx+1] = s.Blank()
+		if x+1 < len(row) {
+			row[x+1] = s.Blank()
 		}
 	}
 }
@@ -463,7 +459,7 @@ func (s *Screen) LineFeed() {
 
 func (s *Screen) lineFeed(wrap int) {
 	s.endGrapheme()
-	s.wraps[s.CursorY] = wrap
+	s.lines[s.CursorY].wrap = wrap
 	if s.CursorY == s.scrollBot {
 		s.scrollUp(1)
 	} else if s.CursorY < s.Rows-1 {
@@ -558,20 +554,26 @@ func (s *Screen) scrollUp(n int) {
 		n = bot - top + 1
 	}
 	if top == 0 && !s.alt && !s.repainting && s.MaxScrollback > 0 {
-		for row := 0; row < n; row++ {
-			s.appendHistory(s.cells[row*s.Cols:(row+1)*s.Cols], s.wraps[row])
+		for _, line := range s.lines[:n] {
+			s.appendHistory(line)
 		}
 	}
-	copy(s.cells[top*s.Cols:(bot-n+1)*s.Cols], s.cells[(top+n)*s.Cols:(bot+1)*s.Cols])
-	copy(s.wraps[top:bot-n+1], s.wraps[top+n:bot+1])
-	for y := bot - n + 1; y <= bot; y++ {
-		s.clearRow(y)
-	}
-	s.Dirty = true
+	s.scrollRegionUp(top, bot, n)
 }
 
-func (s *Screen) appendHistory(line []Cell, wrap int) {
+func (s *Screen) appendHistory(line screenLine) {
 	s.historyAdded++
+	// Hard line tails use the shared default blank implicitly. Keep their
+	// column count so searching and hit testing still see the same row.
+	cells := line.cells
+	if line.wrap == 0 {
+		end := len(cells)
+		for end > 0 && cells[end-1] == Blank {
+			end--
+		}
+		line.padding = len(cells) - end
+		cells = cells[:end]
+	}
 	size, limit := len(s.scrollback), s.MaxScrollback
 	if size > limit || (size < limit && s.oldest != 0) {
 		// A changed limit can require linearizing an already wrapped buffer.
@@ -579,14 +581,18 @@ func (s *Screen) appendHistory(line []Cell, wrap int) {
 		s.retainHistory(size)
 	}
 	if size < limit {
-		s.scrollback = append(s.scrollback, screenLine{append([]Cell(nil), line...), wrap})
+		line.cells = append([]Cell(nil), cells...)
+		s.scrollback = append(s.scrollback, line)
 		return
 	}
 	old := s.scrollback[s.oldest].cells
-	if cap(old)/2 > len(line) {
+	if len(cells) == 0 || cap(old)/2 > len(cells) {
 		old = nil
+	} else if len(cells) < len(old) {
+		clear(old[len(cells):])
 	}
-	s.scrollback[s.oldest] = screenLine{append(old[:0], line...), wrap}
+	line.cells = append(old[:0], cells...)
+	s.scrollback[s.oldest] = line
 	s.oldest = (s.oldest + 1) % size
 }
 
@@ -605,26 +611,18 @@ func (s *Screen) scrollDown(n int) {
 	if n <= 0 || top > bot {
 		return
 	}
-	if n > bot-top+1 {
-		n = bot - top + 1
-	}
-	copy(s.cells[(top+n)*s.Cols:(bot+1)*s.Cols], s.cells[top*s.Cols:(bot-n+1)*s.Cols])
-	copy(s.wraps[top+n:bot+1], s.wraps[top:bot-n+1])
-	for y := top; y < top+n; y++ {
-		s.clearRow(y)
-	}
-	s.Dirty = true
+	s.scrollRegionDown(top, bot, n)
 }
 
 func (s *Screen) clearRow(y int) {
 	if y < 0 || y >= s.Rows {
 		return
 	}
-	s.wraps[y] = 0
+	line := &s.lines[y]
+	line.wrap = 0
 	b := s.Blank()
-	row := s.cells[y*s.Cols : (y+1)*s.Cols]
-	for i := range row {
-		row[i] = b
+	for i := range line.cells {
+		line.cells[i] = b
 	}
 }
 
@@ -636,7 +634,7 @@ func (s *Screen) clearRange(y, x0, x1 int, blank Cell) {
 	if x0 >= x1 {
 		return
 	}
-	row := s.cells[y*s.Cols : (y+1)*s.Cols]
+	row := s.lines[y].cells
 	if x0 > 0 && row[x0].W == 0 {
 		x0--
 	}
@@ -647,7 +645,7 @@ func (s *Screen) clearRange(y, x0, x1 int, blank Cell) {
 		row[x] = blank
 	}
 	if x1 == s.Cols {
-		s.wraps[y] = 0
+		s.lines[y].wrap = 0
 	}
 	s.Dirty = true
 }
@@ -712,7 +710,7 @@ type coloredLineTail struct {
 func (s *Screen) coloredLineTails() map[coloredLineTail]int {
 	var tails map[coloredLineTail]int
 	for y := 0; y < s.Rows; y++ {
-		row := s.cells[y*s.Cols : (y+1)*s.Cols]
+		row := s.lines[y].cells
 		end := len(row)
 		for end > 0 && row[end-1].IsBlank() {
 			end--
@@ -745,7 +743,7 @@ func (s *Screen) eraseResizeTail(tails map[coloredLineTail]int) {
 	x, y := s.CursorX, s.CursorY
 	end := x
 	if len(tails) > 0 {
-		prefix := s.cells[y*s.Cols : y*s.Cols+x]
+		prefix := s.lines[y].cells[:x]
 		key := coloredLineTail{text: lineText(prefix), col: x, color: s.attr.BG}
 		end = max(x, min(s.Cols, tails[key]))
 	}
@@ -772,7 +770,7 @@ func (s *Screen) insertCells(n int) {
 	if n < 1 || s.CursorX >= s.Cols {
 		return
 	}
-	row := s.cells[s.CursorY*s.Cols : (s.CursorY+1)*s.Cols]
+	row := s.lines[s.CursorY].cells
 	if n > s.Cols-s.CursorX {
 		n = s.Cols - s.CursorX
 	}
@@ -789,7 +787,7 @@ func (s *Screen) DeleteChars(n int) {
 	if n < 1 || s.CursorX >= s.Cols {
 		return
 	}
-	row := s.cells[s.CursorY*s.Cols : (s.CursorY+1)*s.Cols]
+	row := s.lines[s.CursorY].cells
 	if n > s.Cols-s.CursorX {
 		n = s.Cols - s.CursorX
 	}
@@ -828,11 +826,8 @@ func (s *Screen) DeleteLines(n int) {
 }
 
 func (s *Screen) scrollRegionUp(top, bot, n int) {
-	if n > bot-top+1 {
-		n = bot - top + 1
-	}
-	copy(s.cells[top*s.Cols:(bot-n+1)*s.Cols], s.cells[(top+n)*s.Cols:(bot+1)*s.Cols])
-	copy(s.wraps[top:bot-n+1], s.wraps[top+n:bot+1])
+	n = min(n, bot-top+1)
+	rotateRows(s.lines[top:bot+1], n)
 	for y := bot - n + 1; y <= bot; y++ {
 		s.clearRow(y)
 	}
@@ -840,15 +835,28 @@ func (s *Screen) scrollRegionUp(top, bot, n int) {
 }
 
 func (s *Screen) scrollRegionDown(top, bot, n int) {
-	if n > bot-top+1 {
-		n = bot - top + 1
-	}
-	copy(s.cells[(top+n)*s.Cols:(bot+1)*s.Cols], s.cells[top*s.Cols:(bot-n+1)*s.Cols])
-	copy(s.wraps[top+n:bot+1], s.wraps[top:bot-n+1])
+	n = min(n, bot-top+1)
+	rotateRows(s.lines[top:bot+1], bot-top+1-n)
 	for y := top; y < top+n; y++ {
 		s.clearRow(y)
 	}
 	s.Dirty = true
+}
+
+// rotateRows moves rows and their wrap positions together, reusing their cells.
+func rotateRows(lines []screenLine, n int) {
+	if n == 0 || n == len(lines) {
+		return
+	}
+	if n == 1 {
+		first := lines[0]
+		copy(lines, lines[1:])
+		lines[len(lines)-1] = first
+		return
+	}
+	slices.Reverse(lines[:n])
+	slices.Reverse(lines[n:])
+	slices.Reverse(lines)
 }
 
 // ---------------------------------------------------------------------------
@@ -945,27 +953,22 @@ func (s *Screen) SetAltScreen(on, saveCursor bool) {
 	s.historyReset++
 	s.resizePaint = resizePaint{}
 	if on {
-		s.mainCells = s.cells
-		s.mainWraps = s.wraps
+		s.mainLines = s.lines
 		s.mainCursor, s.mainSavedCursor = s.cursorState(), s.savedCursor
 		s.mainScrollTop, s.mainScrollBot = s.scrollTop, s.scrollBot
 		s.savedCursor = cursorState{}
 		s.scrollTop, s.scrollBot = 0, s.Rows-1
-		s.cells = blankCells(s.Cols * s.Rows)
-		s.wraps = make([]int, s.Rows)
+		s.lines = newGrid(s.Cols, s.Rows)
 		s.alt = true
 		s.CursorX, s.CursorY = 0, 0
 		s.wrapPending = false
 	} else {
-		if s.mainCells != nil {
-			s.cells = s.mainCells
-			s.wraps = s.mainWraps
+		if s.mainLines != nil {
+			s.lines = s.mainLines
 		} else {
-			s.cells = blankCells(s.Cols * s.Rows)
-			s.wraps = make([]int, s.Rows)
+			s.lines = newGrid(s.Cols, s.Rows)
 		}
-		s.mainCells = nil
-		s.mainWraps = nil
+		s.mainLines = nil
 		s.alt = false
 		s.savedCursor = s.mainSavedCursor
 		s.scrollTop, s.scrollBot = s.mainScrollTop, s.mainScrollBot
@@ -1000,7 +1003,7 @@ func (s *Screen) Cell(x, y int) Cell {
 	if y < 0 || y >= s.Rows || x < 0 || x >= s.Cols {
 		return s.Blank()
 	}
-	return s.cells[y*s.Cols+x]
+	return s.lines[y].cells[x]
 }
 
 // Cursor reports the cursor position.
@@ -1018,7 +1021,7 @@ func (s *Screen) CursorVisibleState() bool { return s.CursorVisible }
 // DefaultAttr returns the current screen default attribute.
 func (s *Screen) DefaultAttr() Attr { return s.attr }
 
-// ScrollbackLine returns a scrollback line (0 = oldest).
+// ScrollbackLine returns the stored cells of a history line (0 = oldest).
 func (s *Screen) ScrollbackLine(i int) []Cell {
 	return s.historyLine(i).cells
 }

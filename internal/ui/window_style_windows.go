@@ -17,6 +17,12 @@ import (
 
 var user32 = windows.NewLazySystemDLL("user32.dll")
 
+func windowBottomResizeBorder() int {
+	const smCYSizeFrame = 33
+	height, _, _ := getSystemMetrics.Call(smCYSizeFrame)
+	return int(height)
+}
+
 var (
 	getForegroundWindow = user32.NewProc("GetForegroundWindow")
 	isIconic            = user32.NewProc("IsIconic")

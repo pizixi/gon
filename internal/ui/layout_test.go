@@ -304,36 +304,86 @@ func TestTabDragReordersWithoutChangingTheActiveShell(t *testing.T) {
 }
 
 func TestPaneHeaderCloseAndGridReflow(t *testing.T) {
-	a := New(config.Default(), nil, "")
-	a.started = true
-	tb := new(Tab)
-	left, right := newInputPane(), newInputPane()
-	left.done = make(chan struct{})
-	tb.addPane(left, SplitRight)
-	tb.addPane(right, SplitRight)
-	a.tabs = []*Tab{tb}
-	h := &layoutTest{App: a, size: image.Pt(909, 601)}
-	h.frame()
-	assertTiled(t, tb, h.paneArea())
-
-	// Click close on the non-focused pane, near the resize handle.
-	h.click(image.Pt(left.Rect().Max.X-5, left.Rect().Min.Y+13))
-	select {
-	case <-left.done:
-	default:
-		t.Fatal("left pane was not closed")
-	}
-	if len(tb.Panes) != 1 || tb.Focused() != right || right.Rect() != h.paneArea() {
-		t.Fatalf("remaining panes = %d, focus = %p, right rect = %v", len(tb.Panes), tb.Focused(), right.Rect())
-	}
-	for _, size := range []image.Point{image.Pt(909, 601), image.Pt(560, 360)} {
-		h.size = size
-		h.frame()
-		area := a.terminalArea(h.paneArea())
-		wantCols, wantRows := a.view.GridFrom(area.Dx(), area.Dy())
-		if cols, rows := right.Size(); cols != wantCols || rows != wantRows {
-			t.Fatalf("terminal grid = %dx%d, want %dx%d for %v", cols, rows, wantCols, wantRows, area)
+	for _, grouped := range []bool{false, true} {
+		name := "WithinTab"
+		if grouped {
+			name = "BetweenTabs"
 		}
+		t.Run(name, func(t *testing.T) {
+			a := New(config.Default(), nil, "")
+			t.Cleanup(a.shutdown)
+			a.started = true
+			leftTab := new(Tab)
+			rightTab := leftTab
+			a.tabs = []*Tab{leftTab}
+			if grouped {
+				rightTab = new(Tab)
+				a.tabs = append(a.tabs, rightTab)
+			}
+			left, right := newInputPane(), newInputPane()
+			left.done = make(chan struct{})
+			leftTab.addPane(left, SplitRight)
+			rightTab.addPane(right, SplitRight)
+			h := &layoutTest{App: a, size: image.Pt(909, 601)}
+			h.frame()
+			if grouped {
+				a.splitTab(leftTab, rightTab, SplitRight, false)
+				h.frame()
+			} else {
+				assertTiled(t, leftTab, h.paneArea())
+			}
+
+			assertClose := func(want *Pane) {
+				t.Helper()
+				var bounds []image.Rectangle
+				for _, node := range h.router.AppendSemantics(nil) {
+					if node.Desc.Label == "关闭窗格" {
+						bounds = append(bounds, node.Desc.Bounds)
+					}
+				}
+				if want == nil {
+					if len(bounds) != 0 {
+						t.Fatalf("unexpected visible pane close controls: %v", bounds)
+					}
+				} else if len(bounds) != 1 || !bounds[0].In(want.Rect()) {
+					t.Fatalf("visible pane close controls = %v, want one within %v", bounds, want.Rect())
+				}
+			}
+			assertClose(nil)
+			for _, pane := range []*Pane{right, left} {
+				r := pane.Rect()
+				h.mouse(pointer.Move, image.Pt(r.Max.X-24, r.Min.Y+13), 0)
+				assertClose(pane)
+			}
+			divider := image.Pt(left.Rect().Max.X, left.Rect().Min.Y+13)
+			h.mouse(pointer.Move, divider, 0)
+			assertClose(nil)
+			if got := h.router.Cursor(); got != pointer.CursorEastWestResize {
+				t.Fatalf("divider cursor = %v", got)
+			}
+
+			// Click close on the non-focused pane without a preceding hover frame.
+			h.click(divider.Sub(image.Pt(5, 0)))
+			select {
+			case <-left.done:
+			default:
+				t.Fatal("left pane was not closed")
+			}
+			if len(a.tabs) != 1 || a.activeTab() != rightTab || len(rightTab.Panes) != 1 ||
+				rightTab.Focused() != right || right.Rect() != h.paneArea() {
+				t.Fatalf("remaining panes = %d, focus = %p, right rect = %v", len(rightTab.Panes), rightTab.Focused(), right.Rect())
+			}
+			assertClose(nil)
+			for _, size := range []image.Point{image.Pt(909, 601), image.Pt(560, 360)} {
+				h.size = size
+				h.frame()
+				area := a.terminalArea(h.paneArea())
+				wantCols, wantRows := a.view.GridFrom(area.Dx(), area.Dy())
+				if cols, rows := right.Size(); cols != wantCols || rows != wantRows {
+					t.Fatalf("terminal grid = %dx%d, want %dx%d for %v", cols, rows, wantCols, wantRows, area)
+				}
+			}
+		})
 	}
 }
 
@@ -389,6 +439,78 @@ func TestPaneDragSwapsAndDividersResizeTogether(t *testing.T) {
 	h.clickControl(t, "隐藏侧栏", 0)
 	for _, pane := range tb.Panes {
 		assertPaneHorizontalInsets(t, pane, 4)
+	}
+}
+
+func TestPaneFooterSwapsAndResizes(t *testing.T) {
+	for _, grouped := range []bool{false, true} {
+		name := "WithinTab"
+		if grouped {
+			name = "BetweenTabs"
+		}
+		t.Run(name, func(t *testing.T) {
+			a := New(config.Default(), nil, "")
+			t.Cleanup(a.shutdown)
+			a.started = true
+			first, second := new(Tab), new(Tab)
+			left, right := newInputPane(), newInputPane()
+			first.addPane(left, SplitRight)
+			a.tabs = []*Tab{first}
+			if grouped {
+				first.addPane(newInputPane(), SplitDown)
+				second.addPane(right, SplitRight)
+				a.tabs = append(a.tabs, second)
+			} else {
+				first.addPane(right, SplitRight)
+			}
+
+			h := &layoutTest{App: a, size: image.Pt(1000, 640)}
+			h.frame()
+			if grouped {
+				a.splitTab(first, second, SplitRight, false)
+				h.frame()
+			}
+			root := a.activeTab().viewportRoot()
+			leftSlot, rightSlot := left.Rect(), right.Rect()
+			source := left
+			if grouped {
+				source = first.Panes[1]
+			}
+			r := source.Rect()
+			y := r.Max.Y - a.paneFooterInset(r) - a.paneFooterH/2
+			from := image.Pt(r.Min.X+r.Dx()/2, y)
+			to := rightSlot.Min.Add(rightSlot.Size().Div(2))
+			h.mouse(pointer.Press, from, pointer.ButtonPrimary)
+			h.mouse(pointer.Move, to, pointer.ButtonPrimary)
+			if !a.dragFromFooter || a.dragPane != source || a.dropPane != right || right.Rect() != rightSlot {
+				t.Fatal("the footer did not preview swapping the existing panes or tabs")
+			}
+			h.mouse(pointer.Release, to, 0)
+			if right.Rect().Min.X != leftSlot.Min.X || left.Rect().Min.X != rightSlot.Min.X || a.currentPane() != source {
+				t.Fatal("the footer swap changed the focused session or left the old positions")
+			}
+			if grouped {
+				if source.tab != first || left.tab != first || right.tab != second || left.Rect().Max.Y != source.Rect().Min.Y ||
+					left.Rect().Min.X != source.Rect().Min.X {
+					t.Fatal("swapping tabs did not keep their inner layout and pane ownership")
+				}
+			}
+
+			cut := right.Rect().Max.X
+			gripY := root.area.Max.Y - a.paneFooterInset(root.area) - a.paneFooterH/2
+			// Start outside the regular divider band to exercise the bottom grip.
+			start := image.Pt(cut+7, gripY)
+			end := start.Add(image.Pt(52, 0))
+			h.mouse(pointer.Press, start, pointer.ButtonPrimary)
+			if a.resizeTile != root || a.dragPane != nil {
+				t.Fatal("the bottom divider grip started the wrong gesture")
+			}
+			h.mouse(pointer.Move, end, pointer.ButtonPrimary)
+			h.mouse(pointer.Release, end, 0)
+			if right.Rect().Max.X != cut+52 || left.Rect().Min.X != cut+52 || a.resizeTile != nil {
+				t.Fatal("dragging the bottom divider grip did not resize the two sides")
+			}
+		})
 	}
 }
 

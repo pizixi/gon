@@ -28,6 +28,7 @@ type View struct {
 
 	metrics    Metrics
 	glyphs     []placedGlyph
+	cellGlyphs cellGlyphCache
 	lineHeight float64
 
 	// BgAlpha is the terminal background opacity (0-255).
@@ -275,8 +276,8 @@ func (v *View) draw(gtx layout.Context, scr *term.Screen, p layoutParams, sel Se
 				x += w
 				continue
 			}
-			st := palette.StyleOf(c.A)
-			if st.BG != palette.Bg {
+			bg := backgroundColor(palette, c.A)
+			if bg != palette.Bg {
 				run := w
 				for x+run < len(line) && x+run < p.cols {
 					nc := line[x+run]
@@ -284,13 +285,13 @@ func (v *View) draw(gtx layout.Context, scr *term.Screen, p layoutParams, sel Se
 						run += cellWidth(nc)
 						continue
 					}
-					if palette.StyleOf(nc.A).BG != st.BG {
+					if backgroundColor(palette, nc.A) != bg {
 						break
 					}
 					run += cellWidth(nc)
 				}
 				rect := image.Rect(x*m.CellW, row*m.CellH, min(p.cols, x+run)*m.CellW, (row+1)*m.CellH)
-				paint.FillShape(gtx.Ops, rgb(st.BG), clip.Rect(rect).Op())
+				paint.FillShape(gtx.Ops, rgb(bg), clip.Rect(rect).Op())
 				x += run
 				continue
 			}
@@ -303,6 +304,8 @@ func (v *View) draw(gtx layout.Context, scr *term.Screen, p layoutParams, sel Se
 
 	// Glyphs and decorations.
 	glyphs := v.glyphs[:0]
+	fg := palette.Fg
+	var lastAttr term.Attr
 	for row := 0; row < p.rows; row++ {
 		line := v.lineAt(scr, p, row)
 		if line == nil {
@@ -315,28 +318,31 @@ func (v *View) draw(gtx layout.Context, scr *term.Screen, p layoutParams, sel Se
 				x += w
 				continue
 			}
-			hasGlyph := c.R != 0 && (c.R != ' ' || c.Combining != "")
+			hasGlyph := cellHasGlyph(c)
 			if !hasGlyph && !c.A.Has(term.AttrUnderline|term.AttrStrike) {
 				x += w
 				continue
 			}
-			st := palette.StyleOf(c.A)
+			if c.A != lastAttr {
+				lastAttr = c.A
+				fg = palette.StyleOf(c.A).FG
+			}
 			px0, px1 := x*m.CellW, (x+w)*m.CellW
 			py := row * m.CellH
 			if hasGlyph && !c.A.Has(term.AttrInvisible) && x+w <= p.cols {
 				cell := image.Rect(px0, py, px1, py+m.CellH)
-				if !drawGridGlyph(gtx, c.R, cell, st.FG) {
-					glyphs = v.placeCellGlyphs(glyphs, c, st.FG, cell, m)
+				if !drawGridGlyph(gtx, c.R, cell, fg) {
+					glyphs = v.placeCachedGlyphs(glyphs, c, fg, cell, m)
 				}
 			}
 			if c.A.Has(term.AttrUnderline) {
 				y := py + m.Baseline + 1
 				y = min(y, py+m.CellH-1)
-				paint.FillShape(gtx.Ops, rgb(st.FG), clip.Rect(image.Rect(px0, y, min(px1, p.cols*m.CellW), y+1)).Op())
+				paint.FillShape(gtx.Ops, rgb(fg), clip.Rect(image.Rect(px0, y, min(px1, p.cols*m.CellW), y+1)).Op())
 			}
 			if c.A.Has(term.AttrStrike) {
 				y := py + m.Baseline - m.FontSize/3
-				paint.FillShape(gtx.Ops, rgb(st.FG), clip.Rect(image.Rect(px0, y, px1, y+1)).Op())
+				paint.FillShape(gtx.Ops, rgb(fg), clip.Rect(image.Rect(px0, y, px1, y+1)).Op())
 			}
 			x += w
 		}
@@ -350,6 +356,18 @@ func (v *View) draw(gtx layout.Context, scr *term.Screen, p layoutParams, sel Se
 	if !p.useHistory {
 		v.drawCursor(gtx, scr, p, palette)
 	}
+	v.cellGlyphs.reset()
+}
+
+func backgroundColor(palette *term.Palette, a term.Attr) uint32 {
+	if a.BG.Mode == term.ColorDefault && !a.Has(term.AttrReverse) {
+		return palette.Bg
+	}
+	return palette.StyleOf(a).BG
+}
+
+func cellHasGlyph(c term.Cell) bool {
+	return c.R != 0 && (c.R != ' ' || c.Combining != "")
 }
 
 func (v *View) drawSelection(gtx layout.Context, p layoutParams, sel Selection, col uint32) {
@@ -422,6 +440,62 @@ func (v *View) placeGlyphLayers(dst []placedGlyph, face *fontset.Face, gid font.
 		if sprite.OK {
 			dst = append(dst, placedGlyph{sprite: sprite, baseline: baseline})
 		}
+	}
+	return dst
+}
+
+type cellGlyphKey struct {
+	tail  string
+	r     rune
+	color uint32
+	style uint16
+	width int
+}
+
+type cellGlyphEntry struct {
+	key        cellGlyphKey
+	start, end int
+}
+
+// Placement is local to one draw and can refer to any atlas page used in
+// that draw. Bound the scratch storage even for a viewport of unique glyphs.
+type cellGlyphCache struct {
+	entries [256]cellGlyphEntry
+	glyphs  []placedGlyph
+}
+
+func (c *cellGlyphCache) reset() {
+	clear(c.entries[:])
+	clear(c.glyphs)
+	c.glyphs = c.glyphs[:0]
+}
+
+func (v *View) placeCachedGlyphs(dst []placedGlyph, c term.Cell, color uint32, cell image.Rectangle, m Metrics) []placedGlyph {
+	cache := &v.cellGlyphs
+	key := cellGlyphKey{tail: c.Combining, r: c.R, color: color, style: c.A.Flags & (term.AttrBold | term.AttrItalic), width: cell.Dx()}
+	index := uint32(key.r) + key.color*31 + uint32(key.style)*17 + uint32(key.width)*7
+	if key.tail != "" {
+		index += uint32(key.tail[len(key.tail)-1])
+	}
+	entry := &cache.entries[index%uint32(len(cache.entries))]
+	if entry.key == key {
+		for _, glyph := range cache.glyphs[entry.start:entry.end] {
+			glyph.baseline = glyph.baseline.Add(cell.Min)
+			glyph.cell = cell
+			dst = append(dst, glyph)
+		}
+		return dst
+	}
+
+	start := len(dst)
+	dst = v.placeCellGlyphs(dst, c, color, cell, m)
+	if len(cache.glyphs)+len(dst)-start <= 512 {
+		from := len(cache.glyphs)
+		for _, glyph := range dst[start:] {
+			glyph.baseline = glyph.baseline.Sub(cell.Min)
+			cache.glyphs = append(cache.glyphs, glyph)
+		}
+		*entry = cellGlyphEntry{key: key, start: from, end: len(cache.glyphs)}
 	}
 	return dst
 }
@@ -563,11 +637,11 @@ func (v *View) drawCursor(gtx layout.Context, scr *term.Screen, p layoutParams, 
 	paint.FillShape(gtx.Ops, cur, clip.Rect(rect).Op())
 
 	// Reverse video: redraw the covered glyph in the background colour.
-	if c.R != 0 && c.R != ' ' && !c.A.Has(term.AttrInvisible) {
+	if cellHasGlyph(c) && !c.A.Has(term.AttrInvisible) {
 		fg := palette.StyleOf(c.A).BG
 		if !drawGridGlyph(gtx, c.R, cellRect, fg) {
 			var buf [4]placedGlyph
-			for _, glyph := range v.placeCellGlyphs(buf[:0], c, fg, cellRect, m) {
+			for _, glyph := range v.placeCachedGlyphs(buf[:0], c, fg, cellRect, m) {
 				glyph.draw(gtx)
 			}
 		}

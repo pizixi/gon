@@ -60,7 +60,7 @@ func (a *App) updateSidebarButtons(gtx layout.Context) {
 	}
 	if a.sidebarToggle.Clicked(gtx) {
 		a.sidebarHidden = !a.sidebarHidden
-		a.menuOpen = false
+		a.closeMenu()
 		a.hoverTab = nil
 		a.tabDrag = tabDrag{}
 		a.revealTab = !a.sidebarHidden
@@ -121,7 +121,7 @@ func (a *App) drawSidebar(gtx layout.Context, area image.Rectangle, list sidebar
 					tabTitle = tab.terminalTitle()
 				}
 				label := tab.sidebarLabel(tabTitle)
-				a.drawTabRow(gtx, row, tab, tabTitle, label, tab == active, px)
+				a.drawTabRow(gtx, row, tab, tabTitle, label, tab == active, tab.group != nil && tab.shownWith(active), px)
 				if tab == a.hoverTab {
 					hoverRow, hoverLabel = row.Intersect(list.area), label
 				}
@@ -162,6 +162,10 @@ func (a *App) updateTabInput(gtx layout.Context, list sidebarList) {
 					a.CloseTab(i)
 					return
 				}
+				if e.Buttons.Contain(pointer.ButtonSecondary) {
+					a.openTabMenu(tab, pos)
+					return
+				}
 				if a.tabDrag.tab == nil && isPrimaryPress(e) {
 					row := list.row(i, a.sideScroll)
 					if pos.In(tabCloseBounds(gtx, row)) {
@@ -192,8 +196,12 @@ func (a *App) updateTabInput(gtx layout.Context, list sidebarList) {
 				a.tabTooltipAt = gtx.Now.Add(tabTooltipDelay)
 				moving := drag.moving
 				a.tabDrag = tabDrag{}
-				if moving && pos.In(list.area) {
-					a.moveTab(i, list.insertion(pos.Y, a.sideScroll, len(a.tabs)))
+				if moving {
+					if pos.In(list.area) {
+						a.moveTab(i, list.insertion(pos.Y, a.sideScroll, len(a.tabs)))
+					} else if drop := a.tabDrop(tab, pos); !drop.bounds.Empty() {
+						a.splitTab(drop.target, tab, drop.mode, drop.before)
+					}
 					return
 				}
 				if !moving && pos.In(list.row(i, a.sideScroll).Intersect(list.area)) {
@@ -261,7 +269,7 @@ func tabCloseBounds(gtx layout.Context, row image.Rectangle) image.Rectangle {
 	return image.Rect(row.Max.X-gtx.Dp(26), row.Min.Y+gtx.Dp(5), row.Max.X-gtx.Dp(3), row.Max.Y-gtx.Dp(5))
 }
 
-func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, title terminalTitle, label tabLabel, active bool, px int) {
+func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, title terminalTitle, label tabLabel, active, grouped bool, px int) {
 	defer clip.Rect(row).Push(gtx.Ops).Pop()
 	hover := a.hoverTab == tab
 	dragged := a.tabDrag.moving && a.tabDrag.tab == tab
@@ -287,6 +295,13 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	col := condColor((active || hover) && !dragged, a.theme.Fg, a.theme.Dim)
 	labelArea := row
 	labelArea.Min.X += gtx.Dp(7)
+	if grouped && !dragged {
+		x, y := row.Min.X+gtx.Dp(2), row.Min.Y+gtx.Dp(8)
+		mark := image.Rect(x, y, x+max(1, gtx.Dp(2)), row.Max.Y-gtx.Dp(8))
+		ink := NRGBA(a.theme.Accent, uint8(condColor(active, 0xff, 0x78)))
+		paint.FillShape(gtx.Ops, ink, clip.UniformRRect(mark, gtx.Dp(1)).Op(gtx.Ops))
+		labelArea.Min.X += gtx.Dp(3)
+	}
 	labelArea.Max.X = close.Min.X - gtx.Dp(3)
 	a.drawTabLabel(gtx, labelArea, label, title, px, col)
 	tab.closeShown = hover && !dragged && gtx.Enabled()
@@ -297,6 +312,57 @@ func (a *App) drawTabRow(gtx layout.Context, row image.Rectangle, tab *Tab, titl
 	// Register the close target even before a hover frame paints its icon.
 	// Otherwise a quick click enters the row's drag/click gesture first.
 	a.layoutIconButton(closeContext, close, &tab.closeButton, "关闭标签页", drawCloseIcon, tab.closeShown)
+}
+
+func (a *App) drawTabDropPreview(gtx layout.Context) {
+	drag := a.tabDrag
+	if !drag.moving || !gtx.Enabled() {
+		return
+	}
+	drop := a.tabDrop(drag.tab, drag.at)
+	bounds := drop.bounds
+	if bounds.Empty() {
+		return
+	}
+	bounds = bounds.Inset(min(gtx.Dp(4), min(bounds.Dx(), bounds.Dy())/4))
+	defer clip.Rect(bounds).Push(gtx.Ops).Pop()
+	pointer.CursorGrabbing.Add(gtx.Ops)
+	shape := clip.UniformRRect(bounds, gtx.Dp(6))
+	paint.FillShape(gtx.Ops, NRGBA(a.theme.Accent, 0x2a), shape.Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, NRGBA(a.theme.Accent, 0xb0), clip.Stroke{Path: shape.Path(gtx.Ops), Width: 1}.Op())
+
+	px := a.uiPx(gtx, 13)
+	padX, padY := min(gtx.Dp(12), bounds.Dx()/10), gtx.Dp(6)
+	lineH := max(gtx.Dp(18), px+gtx.Dp(4))
+	height := 2 * (lineH + padY)
+	width := min(bounds.Dx()-gtx.Dp(8), gtx.Dp(320)) - 2*padX
+	if width <= 0 || height > bounds.Dy() {
+		return
+	}
+
+	label := drag.tab.sidebarLabel(drag.tab.terminalTitle())
+	title := a.fitTabLabel(label, px, width)
+	side := drop.side()
+	instruction := "松开后在" + side + "分屏显示"
+	prompt, promptPx := instruction, px
+	promptWidth := a.textMeasure(prompt, promptPx)
+	if promptWidth > width {
+		promptPx = min(px, max(1, width/4))
+		prompt = a.textFit(side+"分屏", promptPx, width)
+		promptWidth = a.textMeasure(prompt, promptPx)
+	}
+	titleWidth := a.textMeasure(title, px)
+	size := image.Pt(max(promptWidth, titleWidth)+2*padX, height)
+	card := image.Rectangle{Max: size}.Add(bounds.Min.Add(bounds.Size().Sub(size).Div(2)))
+	cardShape := clip.UniformRRect(card, gtx.Dp(8))
+	paint.FillShape(gtx.Ops, NRGBA(a.theme.PanelHi, 0xff), cardShape.Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, NRGBA(a.theme.Accent, 0x9a), clip.Stroke{Path: cardShape.Path(gtx.Ops), Width: 1}.Op())
+	defer clip.Rect(card).Push(gtx.Ops).Pop()
+	semantic.LabelOp(instruction + "「" + label.full() + "」").Add(gtx.Ops)
+	a.drawText(gtx, prompt, card.Min.X+(card.Dx()-promptWidth)/2,
+		card.Min.Y+padY+(lineH+a.textAscent(promptPx))/2, promptPx, a.theme.Dim, 0xff)
+	a.drawText(gtx, title, card.Min.X+(card.Dx()-titleWidth)/2,
+		card.Min.Y+padY+lineH+(lineH+a.textAscent(px))/2, px, a.theme.Fg, 0xff)
 }
 
 func (a *App) drawTabDrag(gtx layout.Context, list sidebarList, px int) {

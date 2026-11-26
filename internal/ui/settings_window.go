@@ -116,6 +116,13 @@ func (a *App) drawWindowNumber(gtx layout.Context, r image.Rectangle, label stri
 	a.drawSettingEditor(gtx, r, label, "", editor, s.shaper, enabled)
 }
 
+func (a *App) textEditorShaper() *text.Shaper {
+	if a.editorShaper == nil {
+		a.editorShaper = text.NewShaper(text.WithCollection(gofont.Regular()))
+	}
+	return a.editorShaper
+}
+
 func (a *App) drawSettingEditor(gtx layout.Context, r image.Rectangle, label, hint string, editor *widget.Editor, shaper *text.Shaper, enabled bool) {
 	if r.Empty() {
 		return

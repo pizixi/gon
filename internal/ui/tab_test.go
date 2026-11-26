@@ -74,7 +74,7 @@ func TestResizePreservesMinimumsAndAdaptsToWindow(t *testing.T) {
 	tb.addPane(right, SplitRight)
 	area, minimum := image.Rect(210, 38, 1013, 641), image.Pt(88, 76)
 	tb.Relayout(area, minimum)
-	tb.root.resize(area.Dx()+100, minimum)
+	tb.root.resize(area.Dx() + 100)
 	tb.Relayout(area, minimum)
 	assertTiled(t, tb, area)
 	if middle.Rect().Dx() != minimum.X || right.Rect().Dx() != minimum.X {
@@ -107,16 +107,28 @@ func TestFocusAtAndNeighbor(t *testing.T) {
 	}
 }
 
-func TestMaxPanes(t *testing.T) {
+func TestSplitPreviewMakesRoomInEarlierPanes(t *testing.T) {
 	tb := new(Tab)
-	for i := 0; i < MaxPanes; i++ {
-		if !tb.CanSplit() {
-			t.Fatalf("pane %d should be allowed", i)
+	minimum := image.Pt(88, 76)
+	area := image.Rect(0, 0, 6*minimum.X, 300)
+	tb.addPane(new(Pane), SplitRight)
+	for count := 2; count <= 6; count++ {
+		tb.Relayout(area, minimum)
+		tile := tb.root.find(tb.Focused())
+		preview := tb.root.splitPreview(area, tile, minimum, SplitRight, false)
+		if preview.Empty() {
+			t.Fatalf("layout could not preview pane %d", count)
 		}
-		tb.addPane(new(Pane), SplitRight)
+		newPane := new(Pane)
+		tb.addPane(newPane, SplitRight)
+		tb.Relayout(area, minimum)
+		assertTiled(t, tb, area)
+		if newPane.Rect() != preview || preview.Dx() < minimum.X {
+			t.Fatalf("pane %d got %v, with preview %v", count, newPane.Rect(), preview)
+		}
 	}
-	if tb.CanSplit() {
-		t.Fatal("a fifth pane must be rejected")
+	if got := tb.root.splitPreview(area, tb.root.find(tb.Focused()), minimum, SplitRight, false); !got.Empty() {
+		t.Fatalf("preview outside window limits: %v", got)
 	}
 }
 

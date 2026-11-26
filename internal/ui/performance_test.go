@@ -50,7 +50,7 @@ func TestFindMatchesReference(t *testing.T) {
 		data.WriteString("\r\n")
 	}
 	term.NewParser(p.scr).Write([]byte(data.String()))
-	queries := append([]string{"", "missing", "aaab", "中e", "\u0301", "🏻‍", "i", "k", "s", "ss", "�"}, clusters...)
+	queries := append([]string{"", "missing", "aaab", "中e", "\u0301", "🏻‍", "i", "k", "s", "ss", "�", "a   ", "    "}, clusters...)
 	for _, query := range queries {
 		for from := -2; from <= p.scr.TotalLines()+1; from++ {
 			for _, forward := range []bool{false, true} {
@@ -87,6 +87,9 @@ func referenceFind(scr *term.Screen, query string, from int, forward bool) (int,
 				for _, r := range cell.Text() {
 					text, cols = append(text, unicode.ToLower(r)), append(cols, col)
 				}
+			}
+			for col := len(cells); col < scr.LineWidth(line); col++ {
+				text, cols = append(text, ' '), append(cols, col)
 			}
 			for at := 0; at+len(q) <= len(text); at++ {
 				if string(text[at:at+len(q)]) == string(q) {

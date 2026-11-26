@@ -45,6 +45,18 @@ var doubleBoxEdges = map[rune]uint8{
 	'╬': leftEdge | rightEdge | topEdge | bottomEdge,
 }
 
+var mixedBoxEdges = map[rune]struct{ single, double uint8 }{
+	'╒': {bottomEdge, rightEdge}, '╓': {rightEdge, bottomEdge},
+	'╕': {bottomEdge, leftEdge}, '╖': {leftEdge, bottomEdge},
+	'╘': {topEdge, rightEdge}, '╙': {rightEdge, topEdge},
+	'╛': {topEdge, leftEdge}, '╜': {leftEdge, topEdge},
+	'╞': {topEdge | bottomEdge, rightEdge}, '╟': {rightEdge, topEdge | bottomEdge},
+	'╡': {topEdge | bottomEdge, leftEdge}, '╢': {leftEdge, topEdge | bottomEdge},
+	'╤': {bottomEdge, leftEdge | rightEdge}, '╥': {leftEdge | rightEdge, bottomEdge},
+	'╧': {topEdge, leftEdge | rightEdge}, '╨': {leftEdge | rightEdge, topEdge},
+	'╪': {topEdge | bottomEdge, leftEdge | rightEdge}, '╫': {leftEdge | rightEdge, topEdge | bottomEdge},
+}
+
 // drawGridGlyph fits rules and blocks to cell edges, regardless of line height.
 func drawGridGlyph(gtx layout.Context, r rune, cell image.Rectangle, color uint32) bool {
 	if r >= '\ue0b0' && r <= '\ue0b7' {
@@ -63,6 +75,12 @@ func drawGridGlyph(gtx layout.Context, r rune, cell image.Rectangle, color uint3
 	w, h := cell.Dx(), cell.Dy()
 	cx, cy := x0+w/2, y0+h/2
 	light, heavy := max(1, w/9), max(2, w/5)
+	if r >= '╒' && r <= '╫' {
+		if edges, ok := mixedBoxEdges[r]; ok {
+			drawMixedBox(cell, edges.single, edges.double, light, fill)
+			return true
+		}
+	}
 	if edges := doubleBoxEdges[r]; edges != 0 {
 		lo, hi := light/2, (light+1)/2
 		gap := max(1, light)
@@ -182,6 +200,49 @@ func drawGridGlyph(gtx layout.Context, r rune, cell image.Rectangle, color uint3
 		return false
 	}
 	return true
+}
+
+func drawMixedBox(cell image.Rectangle, single, double uint8, thick int, fill func(image.Rectangle)) {
+	lo, hi := thick/2, (thick+1)/2
+	cx, cy := cell.Min.X+cell.Dx()/2, cell.Min.Y+cell.Dy()/2
+	if double&(leftEdge|rightEdge) != 0 {
+		x0, x1 := cx-lo, cx+hi
+		if double&leftEdge != 0 {
+			x0 = cell.Min.X
+		}
+		if double&rightEdge != 0 {
+			x1 = cell.Max.X
+		}
+		fill(image.Rect(x0, cy-thick-lo, x1, cy-thick+hi))
+		fill(image.Rect(x0, cy+thick-lo, x1, cy+thick+hi))
+		// The single vertical stroke joins both horizontal lanes.
+		y0, y1 := cy-thick-lo, cy+thick+hi
+		if single&topEdge != 0 {
+			y0 = cell.Min.Y
+		}
+		if single&bottomEdge != 0 {
+			y1 = cell.Max.Y
+		}
+		fill(image.Rect(cx-lo, y0, cx+hi, y1))
+		return
+	}
+	y0, y1 := cy-lo, cy+hi
+	if double&topEdge != 0 {
+		y0 = cell.Min.Y
+	}
+	if double&bottomEdge != 0 {
+		y1 = cell.Max.Y
+	}
+	fill(image.Rect(cx-thick-lo, y0, cx-thick+hi, y1))
+	fill(image.Rect(cx+thick-lo, y0, cx+thick+hi, y1))
+	x0, x1 := cx-thick-lo, cx+thick+hi
+	if single&leftEdge != 0 {
+		x0 = cell.Min.X
+	}
+	if single&rightEdge != 0 {
+		x1 = cell.Max.X
+	}
+	fill(image.Rect(x0, cy-lo, x1, cy+hi))
 }
 
 func drawPowerline(gtx layout.Context, r rune, cell image.Rectangle, color uint32) {

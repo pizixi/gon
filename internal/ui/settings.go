@@ -87,11 +87,9 @@ func (a *App) openSettings() {
 	s.fonts = fontSettings{}
 	s.window.reset(s.draft.Window)
 	s.shells.reset(s.draft.Shells, s.draft.DefaultShell)
-	a.menuOpen = false
+	a.closeMenu()
 	a.hoverTab = nil
-	if a.searchOpen {
-		a.closeSearch()
-	}
+	a.closeSearch()
 	a.resetPaneGesture()
 	a.tabDrag = tabDrag{}
 	a.selecting = nil

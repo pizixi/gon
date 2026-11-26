@@ -417,6 +417,67 @@ func TestPaste(t *testing.T) {
 		t.Fatalf("plain %q", got)
 	}
 }
+
+func TestScrollbackStoresOnlyDefaultHardLineContent(t *testing.T) {
+	s := NewScreen(8, 1, 6)
+	p := NewParser(s)
+	p.Write([]byte("中e\u0301\r\n\r\n\x1b[44mX\x1b[K\x1b[m\r\nabcdefg界\r\n"))
+	for y, want := range []struct {
+		text         string
+		stored, wrap int
+	}{
+		{"中e\u0301", 3, 0},
+		{"", 0, 0},
+		{"X", 8, 0},
+		{"abcdefg", 8, 7},
+		{"界", 2, 0},
+	} {
+		if got := s.Text(y); got != want.text || len(s.AbsLine(y)) != want.stored ||
+			s.LineWidth(y) != 8 || s.WrapColumn(y) != want.wrap {
+			t.Fatalf("line %d = %q, %d stored, %d columns, wrap %d", y, got,
+				len(s.AbsLine(y)), s.LineWidth(y), s.WrapColumn(y))
+		}
+	}
+	if !s.AbsLine(0)[1].Cont || s.AbsLine(2)[7].A.BG != Indexed(4) {
+		t.Fatal("the wide glyph or the colored trailing blanks were lost")
+	}
+	mark := image.Pt(6, 0)
+	p.Resize(10, 2, &mark)
+	if mark != image.Pt(6, 0) || s.Text(0) != "中e\u0301" || s.LineWidth(0) != 6 {
+		t.Fatalf("reflow lost the mark in the blank tail: mark %v, line %q (%d columns)", mark, s.Text(0), s.LineWidth(0))
+	}
+}
+
+func TestScrollRegionMovesRowsAndKeepsSynchronizedFrame(t *testing.T) {
+	s := NewScreen(4, 6, 10)
+	p := NewParser(s)
+	p.SetModernConsole(true)
+	p.Write([]byte("top\r\n123456\r\n中e\u0301\r\nx\r\nlast\x1b[2;5r"))
+	p.Write([]byte("\x1b[?2026h\x1b[2S"))
+	frame, until := s.DisplayFrame(s.syncUntil.Add(-1))
+	for row, want := range []string{"top", "1234", "56", "中e\u0301", "x", "last"} {
+		if got := frame.Text(row); got != want {
+			t.Fatalf("synchronized row %d = %q, want %q", row, got, want)
+		}
+	}
+	if frame.WrapColumn(1) != 4 {
+		t.Fatal("synchronized frame lost the wrapped row")
+	}
+	p.Write([]byte("\x1b[?2026l"))
+	if live, _ := s.DisplayFrame(until); live != s {
+		t.Fatal("the synchronized frame survived the commit")
+	}
+	for row, want := range []string{"top", "中e\u0301", "x", "", "", "last"} {
+		if got := s.Text(row); got != want {
+			t.Fatalf("scrolled row %d = %q, want %q", row, got, want)
+		}
+	}
+	p.Write([]byte("\x1b[2;1H\x1b[2L\x1b[4;1H\x1b[1M"))
+	if s.Text(3) != "x" || s.Text(4) != "" || s.Text(5) != "last" || s.ScrollbackLen() != 0 {
+		t.Fatal("insert/delete lines changed rows outside the region or pushed history")
+	}
+}
+
 func TestScrollbackWrapsAndShrinks(t *testing.T) {
 	s := NewScreen(8, 1, 3)
 	p := NewParser(s)

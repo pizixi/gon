@@ -91,10 +91,16 @@ func (s *Screen) synchronizeOutput(on bool) {
 	if s.syncFrame == nil {
 		s.syncFrame = &Screen{}
 	}
-	cells := append(s.syncFrame.cells[:0], s.cells...)
-	wraps := append(s.syncFrame.wraps[:0], s.wraps...)
+	lines := s.syncFrame.lines
+	if s.syncFrame.Cols != s.Cols || s.syncFrame.Rows != s.Rows {
+		lines = newGrid(s.Cols, s.Rows)
+	}
+	for y, line := range s.lines {
+		copy(lines[y].cells, line.cells)
+		lines[y].wrap = line.wrap
+	}
 	*s.syncFrame = Screen{
-		Cols: s.Cols, Rows: s.Rows, cells: cells, wraps: wraps,
+		Cols: s.Cols, Rows: s.Rows, lines: lines,
 		CursorX: s.CursorX, CursorY: s.CursorY, CursorVisible: s.CursorVisible, CursorStyle: s.CursorStyle,
 		FgColor: s.FgColor, BgColor: s.BgColor, CursorColor: s.CursorColor,
 		historyAdded: s.historyAdded, historyReset: s.historyReset, frameHistory: s.ScrollbackLen(),

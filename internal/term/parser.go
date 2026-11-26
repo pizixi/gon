@@ -165,9 +165,9 @@ func (p *Parser) byte(c byte) {
 		p.st = stGround
 	case stHash:
 		if c == '8' { // DECALN
-			for y := 0; y < s.Rows; y++ {
-				for x := 0; x < s.Cols; x++ {
-					s.cells[y*s.Cols+x] = Cell{R: 'E', W: 1}
+			for _, line := range s.lines {
+				for x := range line.cells {
+					line.cells[x] = Cell{R: 'E', W: 1}
 				}
 			}
 			s.Dirty = true

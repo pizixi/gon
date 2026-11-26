@@ -8,10 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"gioui.org/font/gofont"
 	"gioui.org/io/key"
 	"gioui.org/layout"
-	"gioui.org/text"
 	"gioui.org/widget"
 
 	"gon/internal/config"
@@ -32,7 +30,6 @@ type shellSettings struct {
 	selected            int
 	profiles            []*shellProfile
 	toggle, add, remove widget.Clickable
-	shaper              *text.Shaper
 }
 
 func fieldsForShell(shell config.Shell) shellFields {
@@ -183,9 +180,7 @@ func (a *App) drawShellSettings(gtx layout.Context, row func(int) image.Rectangl
 		return
 	}
 	a.drawSettingStepper(gtx, row(0), setShellProfile, "编辑 Shell", profile.displayName())
-	if s.shaper == nil {
-		s.shaper = text.NewShaper(text.WithCollection(gofont.Regular()))
-	}
+	shaper := a.textEditorShaper()
 	for i, field := range []struct {
 		label, hint string
 		editor      *widget.Editor
@@ -199,7 +194,7 @@ func (a *App) drawShellSettings(gtx layout.Context, row func(int) image.Rectangl
 		a.drawSettingLabel(gtx, r, field.label)
 		y := r.Min.Y + (r.Dy()-gtx.Dp(30))/2
 		fieldArea := image.Rect(r.Min.X+gtx.Dp(98), y, r.Max.X, y+gtx.Dp(30))
-		a.drawSettingEditor(gtx, fieldArea, field.label, field.hint, field.editor, s.shaper, true)
+		a.drawSettingEditor(gtx, fieldArea, field.label, field.hint, field.editor, shaper, true)
 	}
 }
 

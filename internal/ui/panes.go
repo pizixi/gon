@@ -12,6 +12,7 @@ import (
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
+	"gioui.org/io/semantic"
 	"gioui.org/io/system"
 	"gioui.org/io/transfer"
 	"gioui.org/layout"
@@ -29,8 +30,11 @@ type paneTag struct{ p *Pane }
 
 func (paneTag) ImplementsEventTag() {}
 
-// paneDragTag tags a pane header (move).
-type paneDragTag struct{ p *Pane }
+// A pane can be moved by its header or by its footer.
+type paneDragTag struct {
+	p      *Pane
+	footer bool
+}
 
 func (paneDragTag) ImplementsEventTag() {}
 
@@ -45,15 +49,16 @@ type scrollbarDrag struct {
 
 const (
 	paneHeaderHeight    = 22
+	paneFooterHeight    = 14
 	paneHorizontalInset = 4
 	minPaneWidth        = 88
 	minPaneHeight       = 76
 )
 
-// drawPanes lays out and draws every pane of the active tab.
+// drawPanes lays out and draws the active tab and any tabs sharing its view.
 func (a *App) drawPanes(gtx layout.Context, area image.Rectangle) {
-	t := a.activeTab()
-	if t == nil {
+	active := a.activeTab()
+	if active == nil {
 		a.drawEmptyState(gtx, area)
 		return
 	}
@@ -63,35 +68,64 @@ func (a *App) drawPanes(gtx layout.Context, area image.Rectangle) {
 	if a.settings.open {
 		gtx = gtx.Disabled()
 	}
-	t.Relayout(area, a.minPaneSize)
-	if len(t.Panes) > 1 && !a.settings.open {
-		a.updatePaneControls(gtx, t)
-		t.Relayout(area, a.minPaneSize)
+	root := active.viewportRoot()
+	if root == nil {
+		return
+	}
+	root.layout(area, a.minPaneSize)
+	if root.first != nil && gtx.Enabled() {
+		if a.updatePaneControls(gtx, active) {
+			active = a.activeTab()
+			root = active.viewportRoot()
+			if root == nil {
+				return
+			}
+			root.layout(area, a.minPaneSize)
+		}
+		if a.updateDividerDrag(gtx, root) {
+			root.layout(area, a.minPaneSize)
+		}
 	}
 
-	// Keyboard shortcuts can change the tab while we draw its terminals.
-	var framePanes [MaxPanes]*Pane
-	paneCount := copy(framePanes[:], t.Panes)
-	multi := paneCount > 1
-	for _, p := range framePanes[:paneCount] {
-		a.drawPane(gtx, p, p == t.Focused(), multi)
+	// Input can close or switch tabs during this frame.
+	panes := a.framePanes[:0]
+	for _, t := range a.tabs {
+		if t.shownWith(active) {
+			panes = append(panes, t.Panes...)
+		}
 	}
-	showDividers := multi && paneCount == len(t.Panes) && a.activeTab() == t
-	if showDividers {
-		a.drawDividers(gtx, t.root)
+	a.framePanes = panes[:0]
+	defer clear(panes)
+	for _, p := range panes {
+		if p.tab.shownWith(a.activeTab()) {
+			a.drawPane(gtx, p, p == a.currentPane(), len(panes) > 1)
+		}
 	}
+	if root != a.activeTab().viewportRoot() {
+		return
+	}
+	a.drawDividers(gtx, root)
 	// Register scrollbar input after the divider handles so the track gets the press.
-	for _, p := range framePanes[:paneCount] {
-		a.drawScrollbar(gtx, p, area.Max.X)
+	for _, p := range panes {
+		if p.tab != nil {
+			a.drawScrollbar(gtx, p, area.Max.X)
+		}
 	}
-	if showDividers {
-		a.drawPaneDragPreview(gtx, area)
-	}
+	a.drawPaneDragPreview(gtx, area)
+	a.drawTabDropPreview(gtx)
 }
 
-func paneBody(r image.Rectangle, headerHeight int) image.Rectangle {
+func paneBody(r image.Rectangle, headerHeight, footerHeight int) image.Rectangle {
 	r.Min.Y += min(headerHeight, max(0, r.Dy()-1))
+	r.Max.Y -= min(footerHeight, max(0, r.Dy()-1))
 	return r
+}
+
+func (a *App) paneFooterInset(r image.Rectangle) int {
+	if r.Max.Y == a.lastSize.Y && !a.windowMaximized && !a.fullscreen {
+		return min(a.paneBottomBorder, max(0, r.Dy()-1))
+	}
+	return 0
 }
 
 func (a *App) terminalArea(body image.Rectangle) image.Rectangle {
@@ -114,14 +148,22 @@ func (a *App) drawPane(gtx layout.Context, p *Pane, focused, multi bool) {
 	}
 	body := r
 	if multi {
-		body = paneBody(r, a.paneHeaderH)
+		inset := a.paneFooterInset(r)
+		body = paneBody(r, a.paneHeaderH, a.paneFooterH+inset)
 		header := r
 		header.Max.Y = body.Min.Y
 		a.drawPaneHeader(gtx, p, header, focused)
+		footer := r
+		footer.Min.Y = body.Max.Y
+		footer.Max.Y -= inset
+		a.drawPaneFooter(gtx, p, footer, focused)
 	}
 
 	if !a.settings.open {
 		a.paneInput(gtx, p, body, focused)
+	}
+	if !p.tab.shownWith(a.activeTab()) {
+		return
 	}
 	grid := a.view.Grid(a.terminalArea(body))
 	p.Resize(grid.Cols, grid.Rows, image.Pt(grid.Metrics.CellW, grid.Metrics.CellH))
@@ -130,7 +172,7 @@ func (a *App) drawPane(gtx layout.Context, p *Pane, focused, multi bool) {
 		defer clip.Rect(grid.Bounds).Push(gtx.Ops).Pop()
 		defer op.Offset(grid.Bounds.Min).Push(gtx.Ops).Pop()
 
-		a.view.ShowCursor = a.currentPane() == p && !a.settings.open
+		a.view.ShowCursor = a.currentPane() == p && !a.settings.open && a.search.pane == nil
 		a.view.CursorBlinkMS = 0
 		if a.view.ShowCursor && (a.win == nil || a.windowFocused) {
 			if exited, _ := p.Exited(); !exited {
@@ -152,6 +194,7 @@ func (a *App) drawScrollbar(gtx layout.Context, p *Pane, viewportRight int) {
 	grid := p.presented.grid
 	track := pane
 	track.Min = image.Pt(grid.Bounds.Max.X, grid.Bounds.Min.Y)
+	track.Max.Y = grid.Bounds.Max.Y
 	if track.Max.X < viewportRight {
 		track.Max.X-- // Keep the visible divider available for resizing.
 	}
@@ -251,15 +294,22 @@ func (a *App) drawScrollbar(gtx layout.Context, p *Pane, viewportRight int) {
 	paint.Fill(gtx.Ops, NRGBA(a.theme.Dim, al))
 }
 
-func (a *App) updatePaneControls(gtx layout.Context, t *Tab) {
-	for _, p := range t.Panes {
-		if p.closeButton.Clicked(gtx) {
-			a.closePane(p)
-			return
+func (a *App) updatePaneControls(gtx layout.Context, active *Tab) bool {
+	changed := false
+	for _, t := range a.tabs {
+		if !t.shownWith(active) {
+			continue
 		}
-		a.updatePaneDrag(gtx, t, p)
+		for _, p := range t.Panes {
+			if p.closeButton.Clicked(gtx) {
+				a.closePane(p)
+				return true
+			}
+			changed = a.updatePaneDrag(gtx, paneDragTag{p: p}) || changed
+			changed = a.updatePaneDrag(gtx, paneDragTag{p: p, footer: true}) || changed
+		}
 	}
-	a.updateDividerDrag(gtx, t.root)
+	return changed
 }
 
 func (a *App) drawPaneHeader(gtx layout.Context, p *Pane, r image.Rectangle, focused bool) {
@@ -289,7 +339,10 @@ func (a *App) drawPaneHeader(gtx layout.Context, p *Pane, r image.Rectangle, foc
 	}
 	if !a.settings.open && !dragRect.Empty() {
 		deferDrag := clip.Rect(dragRect).Push(gtx.Ops)
-		cursor := pointer.CursorGrab
+		cursor := pointer.CursorPointer
+		if len(p.tab.Panes) > 1 {
+			cursor = pointer.CursorGrab
+		}
 		if a.dragPane == p {
 			cursor = pointer.CursorGrabbing
 		}
@@ -300,6 +353,13 @@ func (a *App) drawPaneHeader(gtx layout.Context, p *Pane, r image.Rectangle, foc
 
 	px := a.uiPx(gtx, 11)
 	name := p.ShellName()
+	if p.tab.group != nil {
+		name = p.tab.sidebarLabel(p.tab.terminalTitle()).full()
+		if focused {
+			mark := image.Rect(r.Min.X+gtx.Dp(2), r.Min.Y+gtx.Dp(4), r.Min.X+gtx.Dp(4), r.Max.Y-gtx.Dp(4))
+			paint.FillShape(gtx.Ops, NRGBA(a.theme.Accent, 0xd0), clip.Rect(mark.Intersect(r)).Op())
+		}
+	}
 	if exited, _ := p.Exited(); exited {
 		name += " (已退出)"
 	}
@@ -307,7 +367,33 @@ func (a *App) drawPaneHeader(gtx layout.Context, p *Pane, r image.Rectangle, foc
 	a.drawText(gtx, a.textFit(name, px, dragRect.Max.X-x), x,
 		r.Min.Y+(r.Dy()+a.textAscent(px))/2, px, condColor(focused || target, a.theme.Fg, a.theme.Dim), 0xff)
 	if !button.Empty() {
-		a.drawIconButton(gtx, button, &p.closeButton, "关闭窗格", drawCloseIcon)
+		a.layoutIconButton(gtx, button, &p.closeButton, "关闭窗格", drawCloseIcon, gtx.Enabled() && p.closeButton.Hovered())
+	}
+}
+
+func (a *App) drawPaneFooter(gtx layout.Context, p *Pane, r image.Rectangle, focused bool) {
+	if r.Empty() {
+		return
+	}
+	tint := uint8(condColor(focused || p == a.dropPane, 0x0c, 0x06))
+	paint.FillShape(gtx.Ops, NRGBA(a.theme.Fg, tint), clip.Rect(r).Op())
+	w, h := min(gtx.Dp(24), r.Dx()/2), min(max(1, gtx.Dp(2)), r.Dy())
+	pos := r.Min.Add(r.Size().Sub(image.Pt(w, h)).Div(2))
+	grip := image.Rectangle{Min: pos, Max: pos.Add(image.Pt(w, h))}
+	ink := NRGBA(a.theme.Dim, 0xb0)
+	if a.dragPane == p || a.dropPane == p {
+		ink = NRGBA(a.theme.Accent, 0xff)
+	}
+	paint.FillShape(gtx.Ops, ink, clip.UniformRRect(grip, h/2).Op(gtx.Ops))
+	if gtx.Enabled() {
+		defer clip.Rect(r).Push(gtx.Ops).Pop()
+		cursor := pointer.CursorGrab
+		if a.dragPane == p {
+			cursor = pointer.CursorGrabbing
+		}
+		cursor.Add(gtx.Ops)
+		semantic.LabelOp("拖动底部栏调整位置").Add(gtx.Ops)
+		event.Op(gtx.Ops, paneDragTag{p: p, footer: true})
 	}
 }
 
@@ -318,7 +404,11 @@ func (a *App) drawPaneDragPreview(gtx layout.Context, area image.Rectangle) {
 	defer clip.Rect(area).Push(gtx.Ops).Pop()
 	pointer.CursorGrabbing.Add(gtx.Ops)
 	if a.dropPane != nil {
-		bounds := a.dropPane.Rect().Inset(gtx.Dp(3))
+		bounds := a.dropPane.Rect()
+		if target := a.dropPane.tab; target != a.dragPane.tab {
+			bounds = target.group.root.findTab(target).area
+		}
+		bounds = bounds.Inset(min(gtx.Dp(3), min(bounds.Dx(), bounds.Dy())/4))
 		shape := clip.UniformRRect(bounds, gtx.Dp(6))
 		paint.FillShape(gtx.Ops, NRGBA(a.theme.Fg, 0x07), shape.Op(gtx.Ops))
 		outline := clip.Stroke{Path: shape.Path(gtx.Ops), Width: float32(max(1, gtx.Dp(1)))}
@@ -327,6 +417,9 @@ func (a *App) drawPaneDragPreview(gtx layout.Context, area image.Rectangle) {
 
 	px, pad := a.uiPx(gtx, 12), gtx.Dp(12)
 	title := a.dragPane.ShellName()
+	if t := a.dragPane.tab; a.dragFromFooter && t.group != nil {
+		title = t.sidebarLabel(t.terminalTitle()).full()
+	}
 	if title == "" {
 		title = "终端"
 	}
@@ -341,23 +434,28 @@ func (a *App) drawPaneDragPreview(gtx layout.Context, area image.Rectangle) {
 	a.drawText(gtx, a.textFit(title, px, w-2*pad), x+pad, y+(h+a.textAscent(px))/2, px, a.theme.Fg, 0xff)
 }
 
-func (a *App) updatePaneDrag(gtx layout.Context, t *Tab, p *Pane) {
-	tag := paneDragTag{p: p}
+func (a *App) updatePaneDrag(gtx layout.Context, tag paneDragTag) bool {
+	p := tag.p
+	changed := false
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: tag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel})
 		if !ok {
-			return
+			return changed
 		}
 		pe := ev.(pointer.Event)
 		pos := image.Pt(int(pe.Position.X), int(pe.Position.Y))
 		if pe.Kind == pointer.Press && a.dragPane == nil && a.resizeTile == nil && isPrimaryPress(pe) {
-			if t.focusByPane(p) {
+			if a.focusPane(p) {
 				a.invalidate()
 			}
+			if len(p.tab.Panes) == 1 && (!tag.footer || p.tab.group == nil) {
+				continue
+			}
 			a.dragPane, a.dragStart, a.dragID = p, pos, pe.PointerID
+			a.dragFromFooter = tag.footer
 			gtx.Execute(pointer.GrabCmd{Tag: tag, ID: pe.PointerID})
 		}
-		if a.dragPane != p {
+		if a.dragPane != p || a.dragFromFooter != tag.footer {
 			continue
 		}
 		if pe.Kind == pointer.Cancel {
@@ -374,12 +472,10 @@ func (a *App) updatePaneDrag(gtx layout.Context, t *Tab, p *Pane) {
 			delta := pos.Sub(a.dragStart)
 			a.paneDragging = a.paneDragging || max(iabs(delta.X), iabs(delta.Y)) >= gtx.Dp(4)
 			if a.paneDragging {
-				if target := t.paneAt(pos); target != p {
-					a.dropPane = target
-				}
+				a.dropPane = paneDragTarget(p, pos, tag.footer)
 			}
 			if pe.Kind == pointer.Release {
-				t.swapPanes(p, a.dropPane)
+				changed = swapDraggedPanes(p, a.dropPane) || changed
 				a.resetPaneGesture()
 			}
 		}
@@ -388,17 +484,24 @@ func (a *App) updatePaneDrag(gtx layout.Context, t *Tab, p *Pane) {
 
 func (a *App) resetPaneGesture() {
 	a.dragPane, a.dropPane, a.resizeTile = nil, nil, nil
-	a.paneDragging = false
+	a.paneDragging, a.dragFromFooter = false, false
 }
 
 func isPrimaryPress(e pointer.Event) bool {
 	return e.Source == pointer.Touch || e.Buttons.Contain(pointer.ButtonPrimary)
 }
 
-func (a *App) updateDividerDrag(gtx layout.Context, n *paneTile) {
-	if n.pane != nil {
-		return
+func (a *App) updateDividerDrag(gtx layout.Context, n *paneTile) bool {
+	if n == nil {
+		return false
 	}
+	if n.tab != nil {
+		return a.updateDividerDrag(gtx, n.tab.root)
+	}
+	if n.first == nil {
+		return false
+	}
+	changed := false
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: n, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel})
 		if !ok {
@@ -409,7 +512,7 @@ func (a *App) updateDividerDrag(gtx layout.Context, n *paneTile) {
 		offset := n.mode.axis(pos.Sub(n.area.Min))
 		if pe.Kind == pointer.Press && a.dragPane == nil && a.resizeTile == nil && isPrimaryPress(pe) {
 			a.resizeTile, a.dragID = n, pe.PointerID
-			a.resizeOffset = offset - n.splitOffset(a.minPaneSize)
+			a.resizeOffset = offset - n.splitOffset()
 			gtx.Execute(pointer.GrabCmd{Tag: n, ID: pe.PointerID})
 		}
 		if a.resizeTile != n {
@@ -424,14 +527,14 @@ func (a *App) updateDividerDrag(gtx layout.Context, n *paneTile) {
 		}
 		switch pe.Kind {
 		case pointer.Drag, pointer.Release:
-			n.resize(offset-a.resizeOffset, a.minPaneSize)
+			changed = n.resize(offset-a.resizeOffset) || changed
 			if pe.Kind == pointer.Release {
 				a.resetPaneGesture()
 			}
 		}
 	}
-	a.updateDividerDrag(gtx, n.first)
-	a.updateDividerDrag(gtx, n.second)
+	changed = a.updateDividerDrag(gtx, n.first) || changed
+	return a.updateDividerDrag(gtx, n.second) || changed
 }
 
 func dividerBand(gtx layout.Context) int {
@@ -439,30 +542,55 @@ func dividerBand(gtx layout.Context) int {
 }
 
 func (a *App) drawDividers(gtx layout.Context, n *paneTile) {
-	if n.pane != nil || n.area.Empty() {
+	if n == nil || n.area.Empty() {
 		return
 	}
-	lo, hi := n.splitBounds(a.minPaneSize)
-	cut := n.splitOffset(a.minPaneSize)
+	if n.tab != nil {
+		a.drawDividers(gtx, n.tab.root)
+		return
+	}
+	if n.first == nil {
+		return
+	}
+	lo, hi := n.splitBounds()
+	cut := n.splitOffset()
 	band := dividerBand(gtx)
 	hit := n.area
+	line := n.area
 	cursor := pointer.CursorEastWestResize
 	if n.mode == SplitRight {
 		x := n.area.Min.X + cut
 		hit.Min.X, hit.Max.X = x-band, x+band
-		line := image.Rect(x-1, n.area.Min.Y, x, n.area.Max.Y)
-		paint.FillShape(gtx.Ops, NRGBA(a.theme.Fg, uint8(condColor(a.resizeTile == n, 0x15, 0x06))),
-			clip.Rect(line.Intersect(n.area)).Op())
+		line.Min.X, line.Max.X = x-1, x
 	} else {
 		y := n.area.Min.Y + cut
 		hit.Min.Y, hit.Max.Y = y-band, y+band
+		line.Min.Y, line.Max.Y = y-1, y
 		cursor = pointer.CursorNorthSouthResize
 	}
+	col := NRGBA(a.theme.Fg, 0x12)
+	if a.resizeTile == n {
+		col = NRGBA(a.theme.Accent, 0x9c)
+	}
+	paint.FillShape(gtx.Ops, col, clip.Rect(line.Intersect(n.area)).Op())
 	if !a.settings.open && (lo < hi || a.resizeTile == n) {
 		stack := clip.Rect(hit.Intersect(n.area)).Push(gtx.Ops)
 		cursor.Add(gtx.Ops)
 		event.Op(gtx.Ops, n)
 		stack.Pop()
+		if n.mode == SplitRight && a.paneFooterH > 0 {
+			x := n.area.Min.X + cut
+			y := n.area.Max.Y - a.paneFooterInset(n.area)
+			half := max(band, gtx.Dp(10))
+			grip := image.Rect(x-half, y-a.paneFooterH, x+half, y).Intersect(n.area)
+			stack := clip.Rect(grip).Push(gtx.Ops)
+			cursor.Add(gtx.Ops)
+			semantic.LabelOp("拖动底部分隔线调整宽度").Add(gtx.Ops)
+			event.Op(gtx.Ops, n)
+			mark := grip.Inset(min(gtx.Dp(3), min(grip.Dx(), grip.Dy())/4))
+			paint.FillShape(gtx.Ops, NRGBA(a.theme.Dim, 0xd0), clip.UniformRRect(mark, gtx.Dp(3)).Op(gtx.Ops))
+			stack.Pop()
+		}
 	}
 	a.drawDividers(gtx, n.first)
 	a.drawDividers(gtx, n.second)
@@ -551,11 +679,11 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, body image.Rectangle, focus
 		case pointer.Event:
 			a.handlePanePointer(gtx, p, ev, grid)
 		case key.Event:
-			if !focused || a.searchOpen {
+			if !focused || a.search.pane != nil {
 				continue
 			}
 			if a.handleShortcut(ev) {
-				if a.currentPane() != p || a.searchOpen {
+				if a.currentPane() != p || a.search.pane != nil {
 					return
 				}
 				continue
@@ -576,7 +704,7 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, body image.Rectangle, focus
 				a.invalidate()
 			}
 		case key.EditEvent:
-			if !focused || a.searchOpen {
+			if !focused || a.search.pane != nil {
 				continue
 			}
 			p.SendTextInput(ev.Text)
@@ -596,7 +724,7 @@ func (a *App) paneInput(gtx layout.Context, p *Pane, body image.Rectangle, focus
 
 	flushDrag(true)
 
-	if focused && !a.searchOpen && !gtx.Focused(tag) {
+	if focused && a.search.pane == nil && !gtx.Focused(tag) {
 		gtx.Execute(key.FocusCmd{Tag: tag})
 	}
 }
@@ -617,7 +745,7 @@ func (a *App) handlePanePointer(gtx layout.Context, p *Pane, ev pointer.Event, g
 			return
 		}
 		a.view.ResetCursorBlink()
-		if t := a.activeTab(); t != nil && t.focusByPane(p) {
+		if a.focusPane(p) {
 			gtx.Execute(key.FocusCmd{Tag: paneTag{p: p}})
 			a.invalidate()
 		}
@@ -857,7 +985,7 @@ func (a *App) handleShortcut(ev key.Event) bool {
 	case alt && (name == string(key.NameLeftArrow) || name == string(key.NameRightArrow) ||
 		name == string(key.NameUpArrow) || name == string(key.NameDownArrow)):
 		t := a.activeTab()
-		if t != nil && len(t.Panes) > 1 {
+		if t != nil && (t.group != nil || len(t.Panes) > 1) {
 			dx, dy := 0, 0
 			switch name {
 			case string(key.NameLeftArrow):
@@ -869,8 +997,7 @@ func (a *App) handleShortcut(ev key.Event) bool {
 			case string(key.NameDownArrow):
 				dy = 1
 			}
-			t.FocusNeighbor(dx, dy)
-			a.invalidate()
+			a.focusAdjacentPane(dx, dy)
 			return true
 		}
 	}

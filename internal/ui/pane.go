@@ -36,12 +36,14 @@ type Pane struct {
 	// Selection in absolute line coordinates.
 	selActive     bool
 	selPending    bool
+	searchMatch   bool
 	selAnchorLine int
 	selAnchorCol  int
 	selCaretLine  int
 	selCaretCol   int
 
-	// rect is the pane geometry in window pixels.
+	// tab owns the pane; rect is its geometry in window pixels.
+	tab             *Tab
 	rect            image.Rectangle
 	closeButton     widget.Clickable
 	scrollbarHover  bool
@@ -181,7 +183,7 @@ func (p *Pane) applyOutput(data []byte) bool {
 		} else {
 			p.scrollOffset = 0
 		}
-		p.selActive, p.selPending = false, false
+		p.clearSelectionLocked()
 		return chromeChanged
 	}
 	newRows := int(total - added)
@@ -199,7 +201,7 @@ func (p *Pane) historyDropped(lines int) {
 	p.selAnchorLine -= lines
 	p.selCaretLine -= lines
 	if p.selAnchorLine < 0 || p.selCaretLine < 0 {
-		p.selActive, p.selPending = false, false
+		p.clearSelectionLocked()
 	}
 }
 
@@ -243,7 +245,7 @@ func (p *Pane) Resize(cols, rows int, cellSize ...image.Point) {
 	p.selAnchorCol, p.selAnchorLine = anchor.X, anchor.Y
 	p.selCaretCol, p.selCaretLine = caret.X, caret.Y
 	if anchor.Y < 0 || caret.Y < 0 {
-		p.selActive, p.selPending = false, false
+		p.clearSelectionLocked()
 	}
 	p.mu.Unlock()
 	if p.sess != nil {
@@ -550,7 +552,7 @@ func (p *Pane) SelectionStart(cx, row int) {
 	if abs < 0 {
 		return
 	}
-	p.selActive, p.selPending = false, true
+	p.selActive, p.selPending, p.searchMatch = false, true, false
 	p.selAnchorLine, p.selAnchorCol = abs, cx
 	p.selCaretLine, p.selCaretCol = abs, cx
 }
@@ -578,9 +580,7 @@ func (p *Pane) SelectRange(row0, col0, row1, col1 int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	base := p.scr.ScrollbackLen() - p.scrollOffset
-	p.selActive, p.selPending = true, false
-	p.selAnchorLine, p.selAnchorCol = base+row0, col0
-	p.selCaretLine, p.selCaretCol = base+row1, col1
+	p.selectAbsLocked(base+row0, col0, base+row1, col1)
 }
 
 // presentedRow is called with the pane lock held. It maps a click on the
@@ -602,9 +602,7 @@ func (p *Pane) selectPresentedRange(row, first, last int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if abs := p.presentedRow(row); abs >= 0 {
-		p.selActive, p.selPending = true, false
-		p.selAnchorLine, p.selAnchorCol = abs, first
-		p.selCaretLine, p.selCaretCol = abs, last
+		p.selectAbsLocked(abs, first, abs, last)
 	}
 }
 
@@ -614,8 +612,11 @@ func (p *Pane) WordRange(row, col int) (start, end int, ok bool) {
 	defer p.mu.Unlock()
 	abs := p.presentedRow(row)
 	line := p.scr.AbsLine(abs)
-	if len(line) == 0 || col < 0 || col >= len(line) {
+	if col < 0 || (col >= len(line) && col >= p.scr.LineWidth(abs)) {
 		return 0, 0, false
+	}
+	if col >= len(line) {
+		return col, col, true
 	}
 	isWord := func(r rune) bool {
 		return r != 0 && r != ' ' && !strings.ContainsRune("()[]{}'\"`,;:|<>", r)
@@ -646,7 +647,7 @@ func (p *Pane) LineRange(row int) (end int, ok bool) {
 	abs := p.presentedRow(row)
 	line := p.scr.AbsLine(abs)
 	if len(line) == 0 {
-		return 0, false
+		return 0, p.scr.LineWidth(abs) > 0
 	}
 	for i := len(line) - 1; i >= 0; i-- {
 		if line[i].R != 0 && line[i].R != ' ' {
@@ -691,11 +692,8 @@ func (p *Pane) URLAt(row, col int) (string, bool) {
 	return "", false
 }
 
-// SelectAbs selects an inclusive absolute cell range.
-func (p *Pane) SelectAbs(abs0, col0, abs1, col1 int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.selActive, p.selPending = true, false
+func (p *Pane) selectAbsLocked(abs0, col0, abs1, col1 int) {
+	p.selActive, p.selPending, p.searchMatch = true, false, false
 	p.selAnchorLine, p.selAnchorCol = abs0, col0
 	p.selCaretLine, p.selCaretCol = abs1, col1
 }
@@ -704,11 +702,15 @@ func (p *Pane) SelectAbs(abs0, col0, abs1, col1 int) {
 // forward selects the next match, otherwise the previous one; the search wraps
 // around the buffer.
 func (p *Pane) Find(query string, fromAbs int, forward bool) (abs, col0, col1 int, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.findLocked(query, fromAbs, forward)
+}
+
+func (p *Pane) findLocked(query string, fromAbs int, forward bool) (abs, col0, col1 int, ok bool) {
 	if query == "" {
 		return 0, 0, 0, false
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	q := []rune(strings.ToLower(query))
 	total := p.scr.TotalLines()
 	// KMP keeps repetitive queries linear in the number of visited runes.
@@ -724,10 +726,15 @@ func (p *Pane) Find(query string, fromAbs int, forward bool) (abs, col0, col1 in
 	}
 	// Only the last query-length set of columns is needed to map a match.
 	columns := make([]int, len(q))
+	endsInSpace := q[len(q)-1] == ' '
 	scan := func(start, end, step int) (int, int, int, bool) {
 		for line := start; line != end; line += step {
 			cells := p.scr.AbsLine(line)
-			if c0, c1, ok := foldedCellIndex(cells, q, prefix, columns); ok {
+			width := len(cells)
+			if endsInSpace {
+				width = p.scr.LineWidth(line)
+			}
+			if c0, c1, ok := foldedCellIndex(cells, width, q, prefix, columns); ok {
 				return line, c0, c1, true
 			}
 		}
@@ -751,7 +758,7 @@ func (p *Pane) Find(query string, fromAbs int, forward bool) (abs, col0, col1 in
 
 // foldedCellIndex searches a row without building strings or rune/column
 // arrays for the entire row. Combining runes keep their leading cell's column.
-func foldedCellIndex(cells []term.Cell, q []rune, prefix, columns []int) (int, int, bool) {
+func foldedCellIndex(cells []term.Cell, width int, q []rune, prefix, columns []int) (int, int, bool) {
 	matched, next := 0, 0
 	consume := func(r rune, col int) bool {
 		columns[next] = col
@@ -789,29 +796,63 @@ func foldedCellIndex(cells []term.Cell, q []rune, prefix, columns []int) (int, i
 			}
 		}
 	}
+	// Within a blank tail, the first match must end within len(q) columns.
+	for col := len(cells); col < min(width, len(cells)+len(q)); col++ {
+		if consume(' ', col) {
+			return columns[next], col, true
+		}
+	}
 	return 0, 0, false
 }
 
-// ScrollToAbs scrolls so the given absolute line is roughly centred.
-func (p *Pane) ScrollToAbs(abs int) {
+// findAndSelect updates the match and viewport against the same screen state.
+func (p *Pane) findAndSelect(query string, forward, includeCurrent bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	sb := p.scr.ScrollbackLen()
-	target := sb - abs + p.rows/2
-	if target < 0 {
-		target = 0
+	top := p.scr.ViewTop(p.scrollOffset)
+	from := top + p.rows
+	if forward {
+		from = top - 1
 	}
-	if target > sb {
-		target = sb
+	if p.searchMatch {
+		from = p.selAnchorLine
+		if includeCurrent {
+			if forward {
+				from--
+			} else {
+				from++
+			}
+		}
+		p.clearSelectionLocked()
 	}
-	p.scrollOffset = target
+	abs, first, last, ok := p.findLocked(query, from, forward)
+	if !ok {
+		return false
+	}
+	p.selectAbsLocked(abs, first, abs, last)
+	p.searchMatch = true
+	history := p.scr.ScrollbackLen()
+	p.scrollOffset = max(0, min(history, history-abs+p.rows/2))
+	return true
+}
+
+func (p *Pane) clearSearchSelection() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.searchMatch {
+		p.clearSelectionLocked()
+	}
 }
 
 // SelectionClear drops the selection.
 func (p *Pane) SelectionClear() {
 	p.mu.Lock()
-	p.selActive, p.selPending = false, false
+	p.clearSelectionLocked()
 	p.mu.Unlock()
+}
+
+func (p *Pane) clearSelectionLocked() {
+	p.selActive, p.selPending, p.searchMatch = false, false, false
 }
 
 // SelectionRange returns the normalized selection and whether it is active.

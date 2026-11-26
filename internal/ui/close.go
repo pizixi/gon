@@ -30,7 +30,7 @@ func (a *App) handleWindowClosing(e *app.ClosingEvent) {
 	e.Abort()
 	if !d.open {
 		*d = closeDialog{open: true}
-		a.menuOpen = false
+		a.closeMenu()
 		a.hoverTab = nil
 		a.tabDrag = tabDrag{}
 		a.resetPaneGesture()
@@ -75,6 +75,7 @@ func (a *App) drawCloseDialog(gtx layout.Context, size image.Point) {
 	if cancel {
 		d.open = false
 		a.settings.focusNew = a.settings.open
+		a.search.focus = a.search.pane != nil
 		a.invalidate()
 		return
 	}

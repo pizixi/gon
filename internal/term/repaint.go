@@ -47,6 +47,7 @@ func (s *Screen) finishResizePaint() {
 		line := &s.scrollback[(s.oldest+start)%len(s.scrollback)]
 		line.cells = append([]Cell(nil), line.cells[:col]...)
 		line.wrap = col
+		line.padding = 0
 		start++
 	} else if start > 0 {
 		// The replaced first row no longer continues the preceding row.

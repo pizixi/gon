@@ -119,8 +119,8 @@ func TestSaveScreenshot(t *testing.T) {
 	}
 	if q := os.Getenv("GON_SEARCH"); q != "" {
 		a.openSearch()
-		a.searchQuery = q
-		a.runSearch(true)
+		a.search.editor.SetText(q)
+		a.setSearchQuery(q)
 	}
 	a.layout(gtx)
 	if err := win.Frame(&ops); err != nil {

@@ -1,24 +1,27 @@
 package term
 
-import "image"
+import (
+	"image"
+	"slices"
+)
 
 type screenLine struct {
-	cells []Cell
-	wrap  int
+	cells   []Cell
+	wrap    int
+	padding int // omitted default blanks at the end of a hard history line
 }
 
 type reflowPosition struct {
 	old, next image.Point
 }
 
-func (s *Screen) reflow(cols, rows int, cells []Cell, wraps []int, cursor, saved *cursorState, positions []*image.Point) ([]Cell, []int) {
+func (s *Screen) reflow(cols, rows int, grid []screenLine, cursor, saved *cursorState, positions []*image.Point) []screenLine {
 	history := len(s.scrollback)
 	at := func(y int) screenLine {
 		if y < history {
 			return s.historyLine(y)
 		}
-		y -= history
-		return screenLine{cells[y*s.Cols : (y+1)*s.Cols], wraps[y]}
+		return grid[y-history]
 	}
 	cursorPoint := func(c *cursorState) image.Point {
 		x := c.x
@@ -47,13 +50,17 @@ func (s *Screen) reflow(cols, rows int, cells []Cell, wraps []int, cursor, saved
 		endRow--
 	}
 	lines := make([]screenLine, 0, endRow)
+	firstLive := 0
 	var pending []Cell
 	var lineMarks []*reflowPosition
 	flush := func(wrap int) {
-		lines = append(lines, screenLine{pending, wrap})
+		lines = append(lines, screenLine{cells: pending, wrap: wrap})
 		pending = nil
 	}
 	for y := 0; y < endRow; y++ {
+		if y == history {
+			firstLive = len(lines)
+		}
 		line := at(y)
 		lineMarks = lineMarks[:0]
 		end := line.wrap
@@ -72,10 +79,15 @@ func (s *Screen) reflow(cols, rows int, cells []Cell, wraps []int, cursor, saved
 			for _, mark := range lineMarks {
 				mark.next = image.Pt(mark.old.X, len(lines))
 			}
-			// The old cell slices can be retained without copying short hard lines.
-			// Restrict capacity because the history ring reuses its storage.
+			// Keep marks within the original logical row even when its
+			// trailing default blanks are omitted.
 			n := min(end, len(line.cells))
-			lines = append(lines, screenLine{cells: line.cells[:n:n]})
+			padding := min(end, len(line.cells)+line.padding) - n
+			cells := line.cells[:n:n]
+			if n == 0 {
+				cells = nil
+			}
+			lines = append(lines, screenLine{cells: cells, padding: padding})
 			continue
 		}
 		for x := 0; x < end; {
@@ -117,14 +129,20 @@ func (s *Screen) reflow(cols, rows int, cells []Cell, wraps []int, cursor, saved
 	top := min(max(viewport.next.Y, len(lines)-rows), marks[0].next.Y)
 	first := max(0, top-max(0, s.MaxScrollback))
 	s.scrollback = append([]screenLine(nil), lines[first:top]...)
+	// Copy rows spilling from the live grid so a few archived cells
+	// cannot retain the original grid's backing array.
+	for i := max(first, firstLive); i < top; i++ {
+		line := &s.scrollback[i-first]
+		line.cells = slices.Clone(line.cells)
+	}
 	s.oldest = 0
-	grid, gridWrap := blankCells(cols*rows), make([]int, rows)
+	next := newGrid(cols, rows)
 	for y, line := range lines[top:min(len(lines), top+rows)] {
-		copy(grid[y*cols:(y+1)*cols], line.cells)
-		gridWrap[y] = line.wrap
+		copy(next[y].cells, line.cells)
+		next[y].wrap = line.wrap
 	}
 	if top+rows < len(lines) {
-		gridWrap[rows-1] = 0
+		next[rows-1].wrap = 0
 	}
 	for i, c := range []*cursorState{cursor, saved} {
 		pos := marks[i].next
@@ -139,7 +157,7 @@ func (s *Screen) reflow(cols, rows int, cells []Cell, wraps []int, cursor, saved
 			*pos = image.Pt(clampInt(next.X, 0, cols-1), next.Y-first)
 		}
 	}
-	return grid, gridWrap
+	return next
 }
 
 func contentEnd(cells []Cell) int {

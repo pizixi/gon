@@ -62,6 +62,46 @@ func (h *layoutTest) shellSidebarRow(t *testing.T, label string, alsoInHeader bo
 	return row
 }
 
+func TestGroupedTabsKeepTheirConPTYSession(t *testing.T) {
+	if !pty.Available() {
+		t.Skip("ConPTY unavailable")
+	}
+	cfg := config.Default()
+	cfg.Shells = []config.Shell{{Name: "Command Prompt", Command: "cmd.exe", Args: []string{"/D", "/Q"}}}
+	a := New(cfg, nil, "")
+	t.Cleanup(a.shutdown)
+	a.started = true
+	a.lastSize = image.Pt(1000, 640)
+	first, err := a.NewTab(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := a.NewTab(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, right := first.Focused(), second.Focused()
+	leftSession, rightSession := left.sess, right.sess
+	a.activateTab(0)
+	h := &layoutTest{App: a, size: a.lastSize}
+	h.frame()
+	a.splitTab(first, second, SplitRight, false)
+	h.frame()
+	if first.group == nil || first.group != second.group || left.sess != leftSession || right.sess != rightSession {
+		t.Fatal("grouping existing tabs replaced one of the original sessions")
+	}
+	left.SendTextInput("echo LEFT-GROUPED\r")
+	right.SendTextInput("echo RIGHT-GROUPED\r")
+	if !waitText(t, left, "LEFT-GROUPED", 8*time.Second) || !waitText(t, right, "RIGHT-GROUPED", 8*time.Second) {
+		t.Fatal("grouped sessions did not return independent output")
+	}
+	a.showTabAlone(second)
+	left.SendTextInput("echo LEFT-HIDDEN\r")
+	if left.visible.Load() || !waitText(t, left, "LEFT-HIDDEN", 8*time.Second) {
+		t.Fatal("detaching interrupted the session in the other tab")
+	}
+}
+
 func TestPaneRunsShell(t *testing.T) {
 	if !pty.Available() {
 		t.Skip("ConPTY unavailable")
@@ -316,6 +356,41 @@ Write-Output "arg=%s"
 	}
 	if !waitText(t, split, "env=SECOND,dir=SECOND directory,only=\narg=SECOND\n", 8*time.Second) {
 		t.Fatalf("split did not inherit the forwarded launch: %q", screenText(split))
+	}
+}
+
+func TestSplitActiveCreatesSixPanes(t *testing.T) {
+	if !pty.Available() {
+		t.Skip("ConPTY unavailable")
+	}
+	cfg := config.Default()
+	cfg.Shells = []config.Shell{{Name: "Command Prompt", Command: "cmd.exe", Args: []string{"/D", "/Q"}}}
+	a := New(cfg, nil, "")
+	t.Cleanup(a.shutdown)
+	a.started = true
+	a.lastSize = image.Pt(1180, 760)
+	tab, err := a.NewTab(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for count := 2; count <= 6; count++ {
+		a.SplitActive(SplitRight)
+		if len(tab.Panes) != count {
+			t.Fatalf("could not open pane %d: %s", count, a.toast)
+		}
+	}
+	h := &layoutTest{App: a, size: a.lastSize}
+	h.frame()
+	assertTiled(t, tab, a.paneArea())
+	for _, p := range tab.Panes {
+		if p.sess == nil || !p.visible.Load() || p.Rect().Dx() < a.minPaneSize.X {
+			t.Fatal("a split is missing its session, visibility, or minimum width")
+		}
+	}
+	last := a.currentPane()
+	last.SendTextInput("echo F6_OK\r")
+	if !waitText(t, last, "F6_OK", 8*time.Second) {
+		t.Fatal("the sixth session did not return output")
 	}
 }
 

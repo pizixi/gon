@@ -136,6 +136,63 @@ func TestRoundedPowerlineSeparatorsMeetSegmentBackground(t *testing.T) {
 	}
 }
 
+func TestMixedBoxDrawingMeetsAdjacentCells(t *testing.T) {
+	v := testView(t)
+	defer v.Family.Close()
+	v.ShowCursor = false
+	for _, size := range []int{15, 28} {
+		v.SetFontSize(size)
+		m := v.Metrics()
+		s := term.NewScreen(4, 6, 0)
+		term.NewParser(s).Write([]byte("╒══╕\r\n│  │\r\n╘══╛\r\n╓──╖\r\n║  ║\r\n╙──╜"))
+		w, h := m.CellW, m.CellH
+		img := drawHeadless(t, 4*w, 6*h, func(gtx layout.Context) {
+			v.DrawRect(gtx, s, 4*w, 6*h, 0, Selection{}, 0)
+		})
+		fg := toRGBA(rgb(v.Pal.Fg))
+		gap := max(1, w/9)
+		for _, at := range []image.Point{
+			image.Pt(w-1, h/2-gap), image.Pt(w, h/2-gap),
+			image.Pt(w-1, h/2+gap), image.Pt(w, h/2+gap),
+			image.Pt(w/2, h-1), image.Pt(w/2, h),
+			image.Pt(w-1, 3*h+h/2), image.Pt(w, 3*h+h/2),
+			image.Pt(w/2-gap, 4*h-1), image.Pt(w/2-gap, 4*h),
+			image.Pt(w/2+gap, 4*h-1), image.Pt(w/2+gap, 4*h),
+		} {
+			if got := img.RGBAAt(at.X, at.Y); got != fg {
+				t.Errorf("size %d: junction pixel %v = %v, want %v", size, at, got, fg)
+			}
+		}
+		if got := img.RGBAAt(w-1, h/2); got != toRGBA(rgb(v.Pal.Bg)) {
+			t.Errorf("size %d: double stroke lost its gap: %v", size, got)
+		}
+	}
+}
+
+func TestBlockCursorKeepsCombiningMarkOnSpace(t *testing.T) {
+	v := testView(t)
+	defer v.Family.Close()
+	m := v.Metrics()
+	s := term.NewScreen(1, 1, 0)
+	p := term.NewParser(s)
+	p.Write([]byte(" \u0301\r"))
+	img := drawHeadless(t, m.CellW, m.CellH, func(gtx layout.Context) {
+		v.DrawRect(gtx, s, m.CellW, m.CellH, 0, Selection{}, 0)
+	})
+	ink := toRGBA(rgb(v.CursorColor))
+	mark := 0
+	for y := range m.CellH {
+		for x := range m.CellW {
+			if img.RGBAAt(x, y) != ink {
+				mark++
+			}
+		}
+	}
+	if mark == 0 || mark == m.CellW*m.CellH {
+		t.Fatalf("block cursor rendered %d mark pixels", mark)
+	}
+}
+
 func TestDrawRectScrollback(t *testing.T) {
 	v := testView(t)
 	scr := term.NewScreen(20, 3, 100)

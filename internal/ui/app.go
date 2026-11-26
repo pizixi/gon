@@ -16,7 +16,6 @@ import (
 	"gioui.org/f32"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
-	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/io/semantic"
 	"gioui.org/io/system"
@@ -25,6 +24,7 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
+	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
 
@@ -50,23 +50,29 @@ type App struct {
 
 	view *render.View
 
-	tabs   []*Tab
-	active int
+	editorShaper *text.Shaper
+
+	tabs       []*Tab
+	active     int
+	framePanes []*Pane
 
 	hdrH int
 	pad  int
 
-	paneHeaderH  int
-	paneInsetPx  int
-	minPaneSize  image.Point
-	dragPane     *Pane
-	dropPane     *Pane
-	dragStart    image.Point
-	dragPoint    image.Point
-	paneDragging bool
-	dragID       pointer.ID
-	resizeTile   *paneTile
-	resizeOffset int
+	paneHeaderH      int
+	paneFooterH      int
+	paneBottomBorder int
+	paneInsetPx      int
+	minPaneSize      image.Point
+	dragPane         *Pane
+	dropPane         *Pane
+	dragFromFooter   bool
+	dragStart        image.Point
+	dragPoint        image.Point
+	paneDragging     bool
+	dragID           pointer.ID
+	resizeTile       *paneTile
+	resizeOffset     int
 
 	selecting       *Pane
 	selectionCursor func() (image.Point, bool)
@@ -102,14 +108,13 @@ type App struct {
 	tabTooltipAt  time.Time
 	tabDrag       tabDrag
 
-	searchOpen  bool
-	searchQuery string
-	searchAbs   int
-	searchMiss  bool
-	hoverMenu   bool
-	menuOpen    bool
-	menuScroll  int
-	settings    settingsPanel
+	search     searchPanel
+	hoverMenu  bool
+	menuOpen   bool
+	menuScroll int
+	menuTab    *Tab
+	menuAt     image.Point
+	settings   settingsPanel
 
 	lastSize        image.Point
 	started         bool
@@ -143,18 +148,20 @@ func New(cfg config.Config, win *app.Window, configPath string) *App {
 		configPath = config.Path()
 	}
 	a := &App{
-		cfg:           cfg,
-		configPath:    configPath,
-		fontDirectory: filepath.Join(filepath.Dir(configPath), "fonts"),
-		wallpaperPath: expandPath(cfg.Wallpaper),
-		win:           win,
-		hdrH:          titleBarHeight,
-		pad:           cfg.Window.Padding,
-		paneHeaderH:   paneHeaderHeight,
-		paneInsetPx:   paneHorizontalInset,
-		minPaneSize:   image.Pt(minPaneWidth, minPaneHeight),
-		fontBase:      int(cfg.Font.Size + 0.5),
-		launches:      make(chan pendingLaunch, 16),
+		cfg:              cfg,
+		configPath:       configPath,
+		fontDirectory:    filepath.Join(filepath.Dir(configPath), "fonts"),
+		wallpaperPath:    expandPath(cfg.Wallpaper),
+		win:              win,
+		hdrH:             titleBarHeight,
+		pad:              cfg.Window.Padding,
+		paneHeaderH:      paneHeaderHeight,
+		paneFooterH:      paneFooterHeight,
+		paneBottomBorder: windowBottomResizeBorder(),
+		paneInsetPx:      paneHorizontalInset,
+		minPaneSize:      image.Pt(minPaneWidth, minPaneHeight),
+		fontBase:         int(cfg.Font.Size + 0.5),
+		launches:         make(chan pendingLaunch, 16),
 	}
 	a.selectionCursor = func() (image.Point, bool) {
 		return windowDragCursor(a.hwnd.Load())
@@ -365,20 +372,15 @@ func (a *App) SplitActive(mode SplitMode) {
 	if t == nil || t.Focused() == nil {
 		return
 	}
-	if !t.CanSplit() {
-		a.notify("最多支持 4 个分屏")
-		return
-	}
-	t.Relayout(a.paneArea(), a.minPaneSize)
+	root := t.viewportRoot()
+	root.measure(a.minPaneSize)
 	focused := t.Focused()
-	src := focused.Rect()
-	span := mode.axis(src.Size())
-	if span < 2*mode.axis(a.minPaneSize) {
+	area := root.splitPreview(a.paneArea(), t.root.find(focused), a.minPaneSize, mode, false)
+	if area.Empty() {
 		a.notify("空间不足，无法继续分屏")
 		return
 	}
-	_, area := splitPaneArea(src, mode, (span+1)/2)
-	p, err := a.newPane(focused.ShellName(), t.launch, paneBody(area, a.paneHeaderH))
+	p, err := a.newPane(focused.ShellName(), t.launch, paneBody(area, a.paneHeaderH, a.paneFooterH+a.paneFooterInset(area)))
 	if err != nil {
 		a.notify("启动失败：" + err.Error())
 		return
@@ -408,17 +410,19 @@ func (a *App) activateTab(i int) {
 		return
 	}
 	if i != a.active {
-		a.setActivePanesVisible(false)
+		a.closeSearch()
 		a.resetPaneGesture()
 		a.selecting = nil
 		a.active = i
 		a.revealTab = true
 	}
-	a.setActivePanesVisible(true)
+	a.updatePaneVisibility()
 }
 
-func (a *App) setActivePanesVisible(visible bool) {
-	if t := a.activeTab(); t != nil {
+func (a *App) updatePaneVisibility() {
+	active := a.activeTab()
+	for _, t := range a.tabs {
+		visible := t.shownWith(active)
 		for _, p := range t.Panes {
 			p.visible.Store(visible)
 		}
@@ -475,37 +479,48 @@ func (a *App) CloseTab(i int) {
 		return
 	}
 	tab := a.tabs[i]
+	neighbor := tab.leaveGroup()
+	if a.menuTab == tab {
+		a.closeMenu()
+	}
 	a.tabs = slices.Delete(a.tabs, i, i+1)
 	a.tabDrag = tabDrag{}
 	if a.hoverTab == tab {
 		a.hoverTab = nil
 	}
-	if i == a.active {
-		a.resetPaneGesture()
+	a.resetPaneGesture()
+	if a.selecting != nil && a.selecting.tab == tab {
 		a.selecting = nil
+	}
+	if i == a.active {
+		a.closeSearch()
 		a.active = max(0, min(i, len(a.tabs)-1))
+		if neighbor != nil {
+			a.active = slices.Index(a.tabs, neighbor)
+		}
 		a.revealTab = true
-		a.setActivePanesVisible(true)
 	} else if i < a.active {
 		a.active--
 	}
-	if len(a.tabs) == 0 && a.searchOpen {
-		a.closeSearch()
-	}
+	a.updatePaneVisibility()
 	for _, p := range tab.Panes {
+		p.tab = nil
 		p.Close()
 	}
 	a.invalidate()
 }
 
 func (a *App) closePane(p *Pane) {
-	t := a.activeTab()
-	if t == nil || p == nil {
+	if p == nil || p.tab == nil {
 		return
 	}
-	if len(t.Panes) == 1 && t.Focused() == p {
-		a.CloseTab(a.active)
+	t := p.tab
+	if len(t.Panes) == 1 {
+		a.CloseTab(slices.Index(a.tabs, t))
 		return
+	}
+	if a.search.pane == p {
+		a.closeSearch()
 	}
 	a.resetPaneGesture()
 	if a.selecting == p {
@@ -601,6 +616,7 @@ func (a *App) layout(gtx layout.Context) {
 	a.sidePx = gtx.Dp(unit.Dp(float32(a.cfg.Window.Sidebar)))
 	a.hdrH = gtx.Dp(titleBarHeight)
 	a.paneHeaderH = gtx.Dp(paneHeaderHeight)
+	a.paneFooterH = gtx.Dp(paneFooterHeight)
 	a.paneInsetPx = gtx.Dp(paneHorizontalInset)
 	a.minPaneSize = image.Pt(gtx.Dp(minPaneWidth), gtx.Dp(minPaneHeight))
 	if p := a.currentPane(); p != nil && p.outputChanged.Swap(false) {
@@ -667,6 +683,7 @@ drained:
 		}
 		a.drawSidebarToolbar(sidebarContext, sidebarRect, list.rowHeight)
 	}
+	a.updateSearch(gtx)
 	a.drawPanes(gtx, termRect)
 	active := a.activeTab()
 	title := active.terminalTitle()
@@ -685,7 +702,7 @@ drained:
 
 func (a *App) updateTerminalFocus() {
 	var focused *Pane
-	if a.windowFocused && !a.settings.open && !a.searchOpen && !a.closeDialog.open {
+	if a.windowFocused && !a.settings.open && a.search.pane == nil && !a.closeDialog.open {
 		focused = a.currentPane()
 	}
 	if focused == nil {
@@ -860,7 +877,8 @@ func (a *App) drawSidebarToolbar(gtx layout.Context, area image.Rectangle, rowH 
 		{"向右分屏", func() { a.SplitActive(SplitRight) }},
 		{"向下分屏", func() { a.SplitActive(SplitDown) }},
 		{"更多操作", func() {
-			a.menuOpen = !a.menuOpen
+			a.menuOpen = !a.menuOpen || a.menuTab != nil
+			a.menuTab = nil
 			a.menuScroll = 0
 		}},
 	}
@@ -981,37 +999,17 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 		event.Op(gtx.Ops, closeTag)
 	}()
 
-	// Build the item list: one entry per configured shell, then pane actions.
-	type item struct {
-		label string
-		run   func()
-	}
-	items := []item{{"设置", a.openSettings}}
-	for i, sh := range a.cfg.Shells {
-		idx := i
-		name := shellDisplayName(sh.Name, sh.Command)
-		items = append(items, item{
-			label: "新建 " + name,
-			run: func() {
-				if _, err := a.NewTab(idx); err != nil {
-					a.notify("启动失败：" + err.Error())
-				}
-			},
-		})
-	}
-	items = append(items,
-		item{"向右分屏", func() { a.SplitActive(SplitRight) }},
-		item{"向下分屏", func() { a.SplitActive(SplitDown) }},
-		item{"关闭当前窗格", func() { a.CloseFocusedPane() }},
-		item{"复制选中文本", func() { a.copySelection() }},
-		item{"粘贴", func() { a.requestPaste() }},
-	)
-
+	items := a.menuItems()
 	px := a.uiPx(gtx, 12)
 	x := sidebar.Min.X + a.pad
 	w, rowH, inset := min(gtx.Dp(210), size.X-x), gtx.Dp(30), gtx.Dp(5)
 	bottom := size.Y - a.pad - gtx.Dp(52)
 	height := min(len(items)*rowH+2*inset, bottom-a.hdrH)
+	if a.menuTab != nil {
+		height = min(len(items)*rowH+2*inset, size.Y)
+		x = max(0, min(size.X-w, a.menuAt.X))
+		bottom = max(height, min(size.Y, a.menuAt.Y+height))
+	}
 	if w <= 2*inset || height <= 2*inset {
 		return
 	}
@@ -1069,7 +1067,7 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 		pad := gtx.Dp(10)
 		a.drawText(gtx, a.textFit(it.label, px, ir.Dx()-2*pad), ir.Min.X+pad, ir.Min.Y+(ir.Dy()+a.textAscent(px))/2, px, a.theme.Fg, 0xff)
 		if clicked {
-			a.menuOpen = false
+			a.closeMenu()
 			it.run()
 			a.invalidate()
 			return
@@ -1081,7 +1079,7 @@ func (a *App) drawMenu(gtx layout.Context, size image.Point, sidebar image.Recta
 		if !ok {
 			break
 		}
-		a.menuOpen = false
+		a.closeMenu()
 		a.invalidate()
 	}
 }
@@ -1210,123 +1208,4 @@ func clampF(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
-}
-
-// searchTag identifies the scrollback search field.
-type searchTag struct{}
-
-// drawSearch renders the scrollback search bar and handles its input.
-func (a *App) drawSearch(gtx layout.Context, area image.Rectangle) {
-	if !a.searchOpen {
-		return
-	}
-	w := gtx.Dp(unit.Dp(300))
-	h := gtx.Dp(unit.Dp(34))
-	r := image.Rect(area.Max.X-w-gtx.Dp(unit.Dp(14)), area.Min.Y+gtx.Dp(unit.Dp(12)), area.Max.X-gtx.Dp(unit.Dp(14)), area.Min.Y+gtx.Dp(unit.Dp(12))+h)
-	paint.FillShape(gtx.Ops, NRGBA(0x11161d, perfAlpha(0.97)), clip.UniformRRect(r, gtx.Dp(unit.Dp(8))).Op(gtx.Ops))
-	paint.FillShape(gtx.Ops, NRGBA(a.theme.Border, perfAlpha(0.7)), clip.Stroke{
-		Path: clip.UniformRRect(r, gtx.Dp(unit.Dp(8))).Path(gtx.Ops), Width: 1,
-	}.Op())
-
-	tag := searchTag{}
-	func() {
-		defer clip.Rect(r).Push(gtx.Ops).Pop()
-		event.Op(gtx.Ops, tag)
-	}()
-	if !gtx.Focused(tag) {
-		gtx.Execute(key.FocusCmd{Tag: tag})
-	}
-	for {
-		ev, ok := gtx.Event(
-			key.FocusFilter{Target: tag},
-			key.Filter{Focus: tag, Name: key.NameReturn},
-			key.Filter{Focus: tag, Name: key.NameEnter},
-			key.Filter{Focus: tag, Name: key.NameEscape},
-			key.Filter{Focus: tag, Name: key.NameDeleteBackward},
-			pointer.Filter{Target: tag, Kinds: pointer.Press},
-		)
-		if !ok {
-			break
-		}
-		switch e := ev.(type) {
-		case key.EditEvent:
-			a.searchQuery += e.Text
-			a.runSearch(true)
-		case key.Event:
-			switch e.Name {
-			case key.NameEscape:
-				a.closeSearch()
-			case key.NameReturn, key.NameEnter:
-				a.runSearch(!e.Modifiers.Contain(key.ModShift))
-			case key.NameDeleteBackward:
-				if q := []rune(a.searchQuery); len(q) > 0 {
-					a.searchQuery = string(q[:len(q)-1])
-					a.runSearch(true)
-				}
-			}
-		case pointer.Event:
-			if e.Kind == pointer.Press {
-				a.closeSearch()
-			}
-		}
-	}
-	px := a.uiPx(gtx, 13)
-	ascent := a.textAscent(px)
-	text := a.searchQuery
-	col := a.theme.Fg
-	if a.searchMiss && text != "" {
-		col = 0xff7b72
-		text = text + "   无匹配"
-	}
-	if text == "" {
-		text = "搜索回滚缓冲区…"
-		col = a.theme.Dim
-	}
-	a.drawText(gtx, a.textFit(text, px, r.Dx()-gtx.Dp(unit.Dp(24))), r.Min.X+gtx.Dp(unit.Dp(12)), r.Min.Y+(r.Dy()+ascent)/2, px, col, 0xff)
-}
-
-// openSearch starts a scrollback search.
-func (a *App) openSearch() {
-	if a.currentPane() == nil {
-		return
-	}
-	a.searchOpen = true
-	a.searchQuery = ""
-	a.searchMiss = false
-	a.searchAbs = a.currentPane().ScrollbackLen()
-	a.invalidate()
-}
-
-// closeSearch hides the search bar and returns focus to the terminal.
-func (a *App) closeSearch() {
-	a.searchOpen = false
-	if p := a.currentPane(); p != nil {
-		p.SelectionClear()
-	}
-	a.invalidate()
-}
-
-// runSearch jumps to the next or previous match.
-func (a *App) runSearch(forward bool) {
-	p := a.currentPane()
-	if p == nil || a.searchQuery == "" {
-		a.searchMiss = false
-		return
-	}
-	abs, c0, c1, ok := p.Find(a.searchQuery, a.searchAbs, forward)
-	if !ok {
-		// Wrap around the buffer.
-		if forward {
-			abs, c0, c1, ok = p.Find(a.searchQuery, -1, true)
-		} else {
-			abs, c0, c1, ok = p.Find(a.searchQuery, 1<<30, false)
-		}
-	}
-	a.searchMiss = !ok
-	if ok {
-		a.searchAbs = abs
-		p.SelectAbs(abs, c0, abs, c1)
-		p.ScrollToAbs(abs)
-	}
-	a.invalidate()
 }
